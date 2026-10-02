@@ -58,7 +58,7 @@ Usage: wx-cli key extract [OPTIONS]
 4. 重签名后需用户确认历史消息可见，再取密钥。若历史不可见立即恢复原应用。
 5. G2 解密通过后才能验证真实 export 的 ID/空窗口行为并进入阶段 3；仍需独立阶段验收。
 
-首次环境核查未做 App 修改；恢复执行的实际操作与回滚证据如下。未执行 sudo、安全设置修改、密钥读取、真实聊天导出或 MCP 注册。任务等待修订签名方案选择，不能标记 done。
+首次环境核查未做 App 修改；恢复执行的实际操作与回滚证据如下。未执行 sudo、安全设置修改、密钥读取、真实聊天导出或 MCP 注册。修订签名方案已获批准，当前等待用户手动退出微信以继续实施，不能标记 done。
 
 ## 4.1.15 恢复执行：签名校验通过但启动失败
 
@@ -120,8 +120,33 @@ Accounts:
 
 重签阶段的 doctor：除 SIP enabled 外，DevToolsSecurity、_developer group、lldb、python3 全通过。SIP 保持 enabled。
 
-## 当前边界与待决策
+## 当前边界与批准方案
 
-官方应用已恢复，未取密钥或改动聊天数据；用户尚未核对 UI 历史。下一候选是临时给主应用添加 disable-library-validation，让腾讯签名 dylib 可被 ad-hoc 主程序加载；这会临时降低该应用的库加载校验，超出原计划的“仅添加 get-task-allow”，需用户选择后更新方案再实施。另一选择是暂缓取密钥，保持官方应用。
+官方应用已恢复，未取密钥或改动聊天数据；用户尚未核对 UI 历史。用户随后选择“继续临时调试方案”，批准临时给主应用添加 disable-library-validation。计划已更新，此项仅降低微信自身的库加载校验，不关闭 SIP，不批量重签嵌套组件，取密钥后恢复完整官方备份。
 
 未尝试关闭 SIP、批量重签嵌套组件、去除 sandbox 或继续未知签名方案。
+
+## 批准方案准备与正常退出被取消
+
+重新读取当前官方签名与原始 XML entitlements，断言当前 CDHash 与已验证官方备份一致、原始 entitlements 与备份完全一致。仅添加两项：
+
+```text
+com.apple.security.get-task-allow = true
+com.apple.security.cs.disable-library-validation = true
+```
+
+写入仓外备份目录的 `debug-entitlements-library-validation.plist`，权限 600。观测输出：
+
+```text
+official_app_matches_verified_backup: true
+original_entitlements_preserved: true
+```
+
+正常退出命令及原始错误：
+
+```text
+osascript -e 'tell application "WeChat" to quit'
+29:33: execution error: WeChat got an error: User canceled. (-128)
+```
+
+命令退出 1；未强制杀进程或绕过取消，未再次改签微信，未取密钥。当前下一步为用户手动退出微信并通知，再执行批准的签名方案；新方案的运行效果与 UI 历史仍未验证。

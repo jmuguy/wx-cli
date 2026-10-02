@@ -69,7 +69,8 @@
 3. 构建本 fork：`cargo build --release`，用 `target/release/wx-cli`（2026-10-02 实测二进制名），**不要覆盖** `~/.local/bin/wx`（另装为 `~/.local/bin/wx-archive-cli` 或直接用绝对路径）。
 4. 重签名方案（issue #20）：
    - 先备份：完整拷贝 `/Applications/WeChat.app` 到 `setup-backup-20261001/`（或用户指定位置），记录原签名 `codesign -dvvv` 与 `--entitlements -` 输出到报告（不含密钥）。
-   - 用升级后的版本**重新导出** entitlements 再加 `get-task-allow`（不要直接用 4.1.5 时期的旧 plist）。
+   - 用升级后的版本**重新导出 XML entitlements**（`codesign -d --entitlements - --xml`），再加 `get-task-allow`（不要直接用 4.1.5 时期的旧 plist）。
+   - **2026-10-02 用户批准的 4.1.15 修订**：仅重签主应用，另临时添加 `com.apple.security.cs.disable-library-validation=true`，解决 ad-hoc 主程序与腾讯签名 libwxld.dylib 的 Team ID 不同导致的 DYLD 拒绝加载。保留 SIP、sandbox、hardened runtime 和其他原始 entitlements，不批量重签嵌套组件。此项降低应用自身的库加载校验；取密钥后恢复完整官方备份，失败立即回滚。
    - ad-hoc 重签名后启动，确认能正常登录、能看到历史消息（**风险点：Team ID 变化可能导致 App Group 容器访问异常、聊天记录看不到**，出现即停，恢复原版 app，回报）。
 5. **门禁 G1**：`wx doctor`（除 SIP 外全过）、`wx status` 能看到账号；微信历史消息在 UI 中正常。
 

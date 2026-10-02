@@ -40,8 +40,13 @@
 - 临时重签主应用，保留嵌套组件原签名和 hardened runtime；签名/entitlements 静态验证通过，但实际启动失败。
 - 原始诊断：`~/Library/Logs/DiagnosticReports/WeChat-2026-10-02-201142.ips`。DYLD 拒绝加载 libwxld.dylib，因为 ad-hoc 主应用与腾讯签名 dylib 的 Team ID 不同。
 - 已用完整备份恢复并再次验证腾讯官方签名，官方应用实际启动成功；SIP 未关闭、没有 sudo 或取密钥。
-- 下一方案是临时对主应用添加 disable-library-validation，或暂缓取密钥；这超出原计划的“只加 get-task-allow”，需用户选择后更新方案。未继续试其他签名、未批量重签嵌套组件。
+- 用户已选择继续临时调试方案，批准仅对主应用添加 disable-library-validation；执行计划已更新，不批量重签嵌套组件。
 
+
+## 阶段 1：批准方案已准备，退出微信被取消
+- 当前官方应用的 CDHash 与已验证备份一致，签名 Team ID 仍为腾讯；重新导出的原始 entitlements 与备份一致。
+- 批准的 plist 已写到备份目录的 `debug-entitlements-library-validation.plist`（600），只添加 get-task-allow 与 disable-library-validation。
+- 正常退出命令 `osascript -e 'tell application "WeChat" to quit'` 返回 `User canceled. (-128)`。未强制结束进程，未再次重签，未取密钥。
 
 ## 下一道门禁
-先让用户确认已恢复的官方微信与历史消息正常。对 DYLD Team ID 错误的修订方案需用户选择；批准后才再次备份/重签并要求用户确认主号与历史消息可见，再取密钥。`key list` 会打印密钥，不能直接运行。
+请用户手动退出微信后继续批准方案；正常启动后仍需用户明确确认主号与历史消息可见，才取密钥。若再次启动异常，恢复已验证的完整官方备份。`key list` 会打印密钥，不能直接运行。
