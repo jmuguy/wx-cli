@@ -5,11 +5,11 @@
 - 用户要求完成整个任务；安全与人工验收门禁仍有效，不能将阶段 0 标记为整体完成。
 
 ## 环境实测
-- 用户已升级至 4.1.15；官方应用恢复后 CLI 实测 running (pid 37288, v4.1.15)。主号身份与历史消息仍待用户确认。
+- 微信 4.1.15 已使用批准的兼容调试签名启动；CLI 实测 running (pid 64227, v4.1.15)。主号身份与历史消息仍待用户确认。
 - `doctor`：DevToolsSecurity、_developer、lldb、python3 全通过；SIP enabled，保持不变。
 - `status`：发现 3 个账号目录，均无 key、无 cache；尚不能判定哪一个是 howiefire。
 - 专用构建实际文件名为 `target/release/wx-cli`，不是原计划写的 `target/release/wx`；没有覆盖旧 `~/.local/bin/wx`。
-- 已备份并临时重签名，启动遇到 DYLD Team ID 校验失败，已恢复官方应用并验证正常运行。未取密钥、未解密、未读取真实聊天。
+- 完整官方备份已验证；首轮重签启动失败后回滚，批准添加 disable-library-validation 的第二轮重签现已成功运行。当前应用仍是临时调试签名，取密钥后恢复官方备份。未取密钥、未解密、未读取真实聊天。
 
 ## 阶段 0：仓库密钥护栏
 - 增加工作区与完整索引扫描、版本化 pre-commit hook、项目安全规则。
@@ -48,5 +48,11 @@
 - 批准的 plist 已写到备份目录的 `debug-entitlements-library-validation.plist`（600），只添加 get-task-allow 与 disable-library-validation。
 - 正常退出命令 `osascript -e 'tell application "WeChat" to quit'` 返回 `User canceled. (-128)`。未强制结束进程，未再次重签，未取密钥。
 
+## 阶段 1：兼容签名实际启动成功，等待历史确认
+- 用户明确通知微信已退出后，未再次发送退出命令；直接实施已批准的第二轮签名。
+- `codesign --force --sign - --options runtime --timestamp=none --entitlements <批准plist> /Applications/WeChat.app` 与 deep/strict 验证均退出 0。
+- 签后 entitlements 与批准文件完全一致，所有原始值保持不变；flags 为 `0x10002(adhoc,runtime)`，两项临时调试权限为 true。
+- `open /Applications/WeChat.app` 后，CLI 实测 running (pid 64227, v4.1.15)，三个账号目录均无 key/cache；doctor 除 SIP enabled 外全通过。只证明进程启动，不证明主号与历史消息可见。
+
 ## 下一道门禁
-请用户手动退出微信后继续批准方案；正常启动后仍需用户明确确认主号与历史消息可见，才取密钥。若再次启动异常，恢复已验证的完整官方备份。`key list` 会打印密钥，不能直接运行。
+请用户在当前已启动的微信里确认主号 howiefire 与历史聊天（包括「哥飞的朋友们」）正常可见；明确确认后才进入取密钥阶段。当前是临时调试签名，取密钥后恢复完整官方备份；若用户暂停或 UI 异常，先恢复官方应用。`key list` 会打印密钥，不能直接运行。

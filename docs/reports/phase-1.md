@@ -1,6 +1,6 @@
 # 阶段 1：环境核查与重签名回滚（未完成）
 
-日期：2026-10-02。首次执行为非破坏性环境核查；用户升级到 4.1.15 后已备份、临时重签名并尝试启动，因 DYLD Team ID 校验失败立即回滚。官方应用已恢复并实际启动成功。G1 仍未通过，未取密钥。
+日期：2026-10-02。首次重签因 DYLD Team ID 校验失败已回滚；用户批准临时 disable-library-validation 并确认微信退出后，兼容重签与静态验证通过，CLI 实测微信 4.1.15 运行。当前为临时调试签名，等待用户确认主号与历史消息；G1 尚未完整通过，未取密钥。
 
 ## 已执行命令与原始输出摘录
 
@@ -58,7 +58,7 @@ Usage: wx-cli key extract [OPTIONS]
 4. 重签名后需用户确认历史消息可见，再取密钥。若历史不可见立即恢复原应用。
 5. G2 解密通过后才能验证真实 export 的 ID/空窗口行为并进入阶段 3；仍需独立阶段验收。
 
-首次环境核查未做 App 修改；恢复执行的实际操作与回滚证据如下。未执行 sudo、安全设置修改、密钥读取、真实聊天导出或 MCP 注册。修订签名方案已获批准，当前等待用户手动退出微信以继续实施，不能标记 done。
+首次环境核查未做 App 修改；恢复执行的实际操作与回滚证据如下。未执行 sudo、系统安全设置修改、密钥读取、真实聊天导出或 MCP 注册。批准的兼容签名现已实际启动，当前等待用户确认主号与历史消息；不能标记整个任务 done。
 
 ## 4.1.15 恢复执行：签名校验通过但启动失败
 
@@ -149,4 +149,45 @@ osascript -e 'tell application "WeChat" to quit'
 29:33: execution error: WeChat got an error: User canceled. (-128)
 ```
 
-命令退出 1；未强制杀进程或绕过取消，未再次改签微信，未取密钥。当前下一步为用户手动退出微信并通知，再执行批准的签名方案；新方案的运行效果与 UI 历史仍未验证。
+该次命令退出 1；没有强制杀进程或绕过取消。后续用户通知已退出后的兼容签名与运行证据见下节。
+
+## 用户退出后：兼容签名实际启动成功
+
+用户明确报告微信已经退出；没有重发退出命令。先验证完整官方备份有效，确认当前官方应用 CDHash 与备份一致，准备文件与此前批准的 entitlements 完全一致，然后执行：
+
+```text
+codesign --force --sign - --options runtime --timestamp=none --entitlements <debug-entitlements-library-validation.plist> /Applications/WeChat.app
+codesign --verify --deep --strict /Applications/WeChat.app
+codesign -d --entitlements - --xml /Applications/WeChat.app
+open /Applications/WeChat.app
+target/release/wx-cli status
+target/release/wx-cli doctor
+```
+
+签名与 deep/strict 校验退出 0；签后 XML entitlements 与批准文件完全一致，所有原始权限值不变。观测：
+
+```text
+compatible_signing_exit: 0
+deep_strict_verify_exit: 0
+signature_flags: flags=0x10002(adhoc,runtime)
+get_task_allow: true
+disable_library_validation: true
+original_entitlements_preserved: true
+```
+
+实际 CLI 运行输出：
+
+```text
+WeChat:   running (pid 64227, v4.1.15)
+Accounts:
+  jmuguy_6a0d  key ✗  no cache
+  wxid_e1xwpk9mdgvf22_1110  key ✗  no cache
+  wxid_7jh0z93utey012_176d  key ✗  no cache
+✗  SIP disabled             SIP is enabled
+✅  DevToolsSecurity         DevToolsSecurity is enabled
+✅  _developer group         user is in _developer group
+✅  lldb                     lldb-2100.0.17.203
+✅  python3                  Python 3.14.7
+```
+
+这证明兼容签名应用已实际启动，不证明正确主号登录或历史消息可见。当前仍是临时调试签名，完整官方备份在 `~/Library/Application Support/howie-wechat-archive/setup-backup-20261002-200929/WeChat.app`；取密钥后必须恢复。等待用户明确确认主号 howiefire 与「哥飞的朋友们」历史正常后，才允许进入 G2。未取密钥、未解密、未读取真实聊天或注册 MCP。
