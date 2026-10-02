@@ -2,9 +2,12 @@ use std::time::Duration;
 
 use crate::util::{lookup_or_resolve_nickname, parse_hex_key_32};
 
-pub async fn cmd_key_extract(timeout_secs: u64) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cmd_key_extract(
+    timeout_secs: u64,
+    allow_sip_enabled: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
     eprintln!("Running pre-flight checks...");
-    wx_keychain::preflight_checks()?;
+    wx_keychain::preflight_checks_with_sip_override(allow_sip_enabled)?;
     eprintln!("  All checks passed.");
 
     let version = wx_keychain::ensure_supported_wechat_version()?;

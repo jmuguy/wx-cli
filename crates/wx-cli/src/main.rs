@@ -530,6 +530,9 @@ enum KeyAction {
         /// Timeout in seconds for LLDB capture
         #[arg(long, default_value = "120")]
         timeout: u64,
+        /// Attempt LLDB extraction with SIP enabled (requires a debuggable WeChat signature)
+        #[arg(long)]
+        allow_sip_enabled: bool,
     },
     /// List stored keys
     List,
@@ -570,7 +573,10 @@ async fn main() {
 
     let result = match cli.command {
         Commands::Key { action } => match action {
-            KeyAction::Extract { timeout: t } => cmd::key::cmd_key_extract(t).await,
+            KeyAction::Extract {
+                timeout: t,
+                allow_sip_enabled,
+            } => cmd::key::cmd_key_extract(t, allow_sip_enabled).await,
             KeyAction::List => cmd::key::cmd_key_list(),
             KeyAction::Set { account, hex_key } => cmd::key::cmd_key_set(&account, &hex_key),
             KeyAction::SetImage { account, image_key } => {

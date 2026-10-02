@@ -176,7 +176,23 @@ pub fn all_preflight_checks() -> Vec<PreflightCheck> {
 /// Verifies: SIP disabled, DevToolsSecurity enabled, _developer group membership,
 /// LLDB and python3 available.
 pub fn preflight_checks() -> Result<(), KeychainError> {
-    for check in all_preflight_checks() {
+    preflight_checks_with_sip_override(false)
+}
+
+/// Opt-in LLDB path: skip only SIP, retaining every other prerequisite.
+/// This does not change macOS security settings or guarantee attach succeeds.
+pub fn preflight_checks_with_sip_override(allow_sip_enabled: bool) -> Result<(), KeychainError> {
+    validate_preflight_checks(all_preflight_checks(), allow_sip_enabled)
+}
+
+fn validate_preflight_checks(
+    checks: Vec<PreflightCheck>,
+    allow_sip_enabled: bool,
+) -> Result<(), KeychainError> {
+    for check in checks {
+        if allow_sip_enabled && check.name == "SIP disabled" {
+            continue;
+        }
         if !check.passed {
             return Err(match check.name {
                 "SIP disabled" => KeychainError::SipEnabled,
@@ -194,4 +210,29 @@ pub fn preflight_checks() -> Result<(), KeychainError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod sip_override_tests {
+    use super::*;
+    fn fail(name: &'static str) -> PreflightCheck {
+        PreflightCheck {
+            name,
+            passed: false,
+            detail: "fixture".into(),
+            fix_cmd: None,
+        }
+    }
+    #[test]
+    fn sip_override_keeps_other_checks_and_default_requirement() {
+        assert!(matches!(
+            validate_preflight_checks(vec![fail("SIP disabled")], false),
+            Err(KeychainError::SipEnabled)
+        ));
+        assert!(validate_preflight_checks(vec![fail("SIP disabled")], true).is_ok());
+        assert!(matches!(
+            validate_preflight_checks(vec![fail("SIP disabled"), fail("DevToolsSecurity")], true),
+            Err(KeychainError::DevToolsSecurityDisabled)
+        ));
+    }
 }

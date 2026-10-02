@@ -17,5 +17,11 @@
 - SKILL.md 的手动密钥示例改为占位符，避免护栏把演示 hex 当真实密钥。
 - 既有 SIP override、密钥脱敏、归档原型尚待按逻辑整理提交。
 
+## 阶段 0：SIP opt-in 整理
+- 保留既有 `--allow-sip-enabled` 实现，默认仍拒绝 SIP enabled；opt-in 只跳过 SIP，不跳过其他预检。
+- `cargo test -p wx-keychain`：62 passed；`cargo clippy` 成功。
+- release CLI 的 `key extract --help` 已实际显示 opt-in 参数；未执行取密钥。
+
+
 ## 下一道门禁
 用户升级并登录主号后，重新核对版本与账号；先完整备份升级后的 WeChat.app，再导出新 entitlements，不复用旧版 plist。重签名后用户确认历史消息可见，才允许取密钥。`key list` 会打印密钥，不能直接运行。
