@@ -15,13 +15,17 @@
 - 增加工作区与完整索引扫描、版本化 pre-commit hook、项目安全规则。
 - Cargo.lock 的 checksum 与五处精确上游合成夹具行不是生产密钥；仅对上述精确内容豁免。
 - SKILL.md 的手动密钥示例改为占位符，避免护栏把演示 hex 当真实密钥。
-- 既有 SIP override、密钥脱敏、归档原型尚待按逻辑整理提交。
+- SIP opt-in 已整理提交；密钥脱敏与归档原型待后续逻辑提交。
 
 ## 阶段 0：SIP opt-in 整理
 - 保留既有 `--allow-sip-enabled` 实现，默认仍拒绝 SIP enabled；opt-in 只跳过 SIP，不跳过其他预检。
 - `cargo test -p wx-keychain`：62 passed；`cargo clippy` 成功。
 - release CLI 的 `key extract --help` 已实际显示 opt-in 参数；未执行取密钥。
 
+
+## 阶段 0：密钥脱敏整理
+- 保留既有修改：`key extract` 不再打印原始 key；LLDB 日志只保存调用计数与完成状态，权限设为 600。
+- 以上路径已编译通过，真实 LLDB 捕获与日志权限仍需 G2 实测；不能把静态检查写成真实取密钥通过。
 
 ## 下一道门禁
 用户升级并登录主号后，重新核对版本与账号；先完整备份升级后的 WeChat.app，再导出新 entitlements，不复用旧版 plist。重签名后用户确认历史消息可见，才允许取密钥。`key list` 会打印密钥，不能直接运行。

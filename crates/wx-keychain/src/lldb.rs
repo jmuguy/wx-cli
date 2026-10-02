@@ -110,7 +110,6 @@ pub async fn capture_key(
     let mut current_call: Option<(u32, u32)> = None; // (call_count, rounds)
     let mut current_password: Option<String> = None;
     let mut call_count = 0u32;
-    let mut output_lines = Vec::new();
 
     let result = timeout(capture_timeout, async {
         loop {
@@ -119,8 +118,6 @@ pub async fn capture_key(
                 Ok(None) => break Err(KeychainError::NoPbkdfCalls),
                 Err(e) => break Err(KeychainError::Other(format!("read error: {e}"))),
             };
-
-            output_lines.push(line.clone());
 
             if let Some(caps) = re_header.captures(&line) {
                 let count: u32 = caps[1].parse().unwrap_or(0);
@@ -198,8 +195,17 @@ pub async fn capture_key(
     })
     .await;
 
-    // Save output for debugging.
-    let _ = std::fs::write(&output_path, output_lines.join("\n"));
+    // Capture output contains raw keys. Persist only a redacted diagnostic summary.
+    let diagnostic = format!(
+        "PBKDF2 calls observed: {call_count}; capture completed: {}\n",
+        matches!(&result, Ok(Ok(_)))
+    );
+    let _ = std::fs::write(&output_path, diagnostic);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&output_path, std::fs::Permissions::from_mode(0o600));
+    }
 
     // Kill LLDB.
     let _ = lldb.kill().await;

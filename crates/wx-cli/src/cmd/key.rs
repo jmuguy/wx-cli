@@ -43,7 +43,7 @@ pub async fn cmd_key_extract(
     let hex_key = hex::encode(result.raw_key);
     eprintln!("Key captured after {} PBKDF2 calls.", result.call_count);
     eprintln!("Matched account: {}", matched.account_id);
-    println!("{hex_key}");
+    // Persist locally; never print the captured secret to terminal or agent logs.
 
     let nickname = wx_keychain::resolve_nickname(
         &matched.data_dir,
