@@ -66,7 +66,7 @@
 ### 阶段 1：前置环境（约 1–2 小时，**需要用户在场**）
 1. **用户操作**：微信升级到 ≥ 4.1.7（App Store 或官网）。AI 只核对 `CFBundleShortVersionString`。
 2. 核对/补 `_developer` 组（需 sudo，由用户执行 AI 给出的命令）。
-3. 构建本 fork：`cargo build --release`，用 `target/release/wx`，**不要覆盖** `~/.local/bin/wx`（另装为 `~/.local/bin/wx-archive-cli` 或直接用绝对路径）。
+3. 构建本 fork：`cargo build --release`，用 `target/release/wx-cli`（2026-10-02 实测二进制名），**不要覆盖** `~/.local/bin/wx`（另装为 `~/.local/bin/wx-archive-cli` 或直接用绝对路径）。
 4. 重签名方案（issue #20）：
    - 先备份：完整拷贝 `/Applications/WeChat.app` 到 `setup-backup-20261001/`（或用户指定位置），记录原签名 `codesign -dvvv` 与 `--entitlements -` 输出到报告（不含密钥）。
    - 用升级后的版本**重新导出** entitlements 再加 `get-task-allow`（不要直接用 4.1.5 时期的旧 plist）。

@@ -1,2 +1,9 @@
 /target
 .DS_Store
+
+# Local archive data and Python caches
+__pycache__/
+*.pyc
+/archive/private/
+*.sqlite3
+.pytest_cache/
