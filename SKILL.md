@@ -100,7 +100,7 @@ wx-cli decrypt --incremental
 手动设置密钥：
 
 ```bash
-wx-cli key set <account_id> 0123456789abcdef...       # 数据库密钥（32 字节 hex）
+wx-cli key set <account_id> <database_key_hex>        # 数据库密钥（32 字节 hex，不要贴入日志）
 wx-cli key set-image <account_id> abcdefghijklmnop     # 图片 AES 密钥（V2 格式）
 ```
 
