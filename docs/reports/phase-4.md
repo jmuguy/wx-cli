@@ -54,7 +54,7 @@ MCP 以 SQLite mode=ro/query_only 打开已有库，不创建、不迁移、不 
 
 最终只读修复复核使用相同 Claude 模型、effort=medium、禁工具/会话持久化，提供 save 完整关键路径、依赖变更和原始上下文：SELECT 为 8 个基础列、条件追加两列、最后追加 rowid；归档 export 调用 resolve_parallel/collect，图片转换失败为 hard_failed，不经过旧 MediaBridge 的流式软失败路径。Claude exit 0、is_error=false，verdict=pass、findings=[]、unverified=[]，唯一缺陷 resolved、rowid resolved、媒体路径 resolved_as_described（父会话调用链证据佐证）；不是把 smoke 当静态评审。私有输入/结果位于 ROOT/claude-acceptance-pf6ahtan，文件 0600、目录 0700。
 
-因此独立 Claude 条件与真实模型 search 条件均通过。三个答案的业务判断已由用户明确确认通过；实际微信 UI 窗口/同秒核对仍待 phase-5，不冒充整任务完成。
+因此独立 Claude 条件与真实模型 search 条件均通过。三个答案业务判断、三个日期窗口与三组同秒消息构成的 UI 核对亦已由用户确认，G5通过（phase-5）；仍保留本地缺失媒体字节不可验证的边界，调度启用由用户另行决定。
 
 同秒排序修复另做独立 Claude 评审：全部 2 个生产文件改动与 2 个回归文件 diff，claude-sonnet-4-6、effort=medium、safe-mode、禁工具和持久化，exit 0、verdict=pass。初次附带的 LIMIT/Option local_id/测试词内容三项意见经源码上下文复核全部撤销：每分片本已取 offset+limit；Rust local_id 实际为 i64；测试最终显式词覆盖 FTS/LIKE。最终仅一项 info（跨分片同 rowid 用 server_id 确定性兜底，非缺陷），无可证代码缺陷；图片字节/图片内部顺序、另外两组 UI 不由静态评审验证。Rust 完整门禁后实际 809 passed，Python 63+65 subtests，补齐模型当时未运行测试的验证空白。评审材料/结果在 ROOT/claude-order-review-bpxw_aah，目录 0700/文件 0600。
 
