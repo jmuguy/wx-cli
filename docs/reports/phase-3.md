@@ -33,9 +33,11 @@ v1 media manifest 按顶层 Image/Voice/Video/File 消息计数，区分 availab
 
 ## 回归与变异
 
-实际最终门禁：`cargo test --workspace` 806 passed、46 suites、11 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 通过；release build 通过。`python3 -m pytest -q archive/tests` 62 passed、65 subtests passed。
+实际最终门禁：`cargo test --workspace` 807 passed、46 suites、11 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 通过；release build 通过。`python3 -m pytest -q archive/tests` 62 passed、65 subtests passed（既有归档验收，本次仅改 Rust 密钥保存，不重复声称重跑 Python）。
 
 先失败后修复的消费行为：派生元数据误计为编辑、同秒 local-only 邻居排序、MCP 越界整数中断后续请求、大 server_id 的不安全 JSON 数字、预期缺失诊断含 os error 2/文件名含 error 被误判、自动采集缺少分片来源。已保留确定性行为回归；删除错误措辞钉死和仅 helper 转发的身份断言，改为真实 SQLite 查询六条同秒/同 rowid/跨分片记录并逐页核对。
+
+Claude 复核新增密钥保存回归：固定临时文件遗留导致 AlreadyExists 已先失败复现，再改唯一私有临时文件原子替换。实际进程 smoke 验证保存/重载、未知遗留文件不变、0600/0700；完整 Rust 门禁与 Claude 修复复核通过，细节见 phase-4。
 
 隔离变异结果：25 个 Python + 3 个 Rust，28/28 被对应行为回归击杀；不是编译失败或测试发现错误。
 
@@ -57,4 +59,4 @@ Rust 变异使用了独立源码副本，但曾共享 target，随后主仓门�
 
 安装器真实运行于隔离 HOME，含空格/引号路径；两个 plist 均 0600、RunAtLoad=false，渲染命令实际 `--help` exit 0。解释器为稳定 `/opt/homebrew/bin/python3`；没有安装或 load 真实用户 LaunchAgents。每小时 discover、周日 04:17 reconcile 的自动启动仍由用户决定，不声称后台定时归档已经运行。
 
-技术实现与实跑已完成。Claude 独立验收未通过（429，详见 phase-4）；微信 UI 和三个问答的人为判断未通过（phase-5）。任务不得标 done。
+技术实现与实跑已完成。Claude 独立源码评审及真实模型 MCP 调用均已通过（phase-4）；微信 UI 和三个问答的人为判断仍待确认（phase-5）。任务不得标 done。

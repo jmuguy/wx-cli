@@ -30,10 +30,28 @@ MCP 以 SQLite mode=ro/query_only 打开已有库，不创建、不迁移、不 
 
 上述是实际注册命令的 stdio 协议运行与消费，不等于 Claude 模型主动调用工具。
 
-## 未通过的独立 Claude 门禁
+## 额度恢复后的真实 Claude 模型调用
+
+2026-10-03 用户确认额度恢复后，重新运行 claude-sonnet-4-6。使用 restricted、strict-mcp-config、无内建工具，仅显式加载既有注册的本服务；禁用会话持久化，原始 stream-json 留在仓外 0600 文件。
+
+- 第一次模型真实调用 `mcp__wechat-archive__search` 成功，命中 SID/message_id `3920274865756710861`。这已满足“真实 Claude Code 模型主动调用一次 search”，不是 Python 模拟协议。
+- 同次 get_context 的模型参数被传为舍入后的大 JSON 数字，服务明确拒绝，未返回错误引用。没有把此失败标为上下文成功。
+- 只做一次回退，使用现有 `message_id` 字符串 + `id_kind=server`：Claude 模型实际 search/get_context 两次 tool_use 与对应成功 tool_result 均可核对，两个结果的 message_id 完全一致。进程 exit 0、stderr 0，归档数据库字节与 mtime 在回退调用期间不变。
+- 建议 Claude 调用上下文优先使用字符串 message_id；server_id 数字精度守卫继续保留，不因模型错误而放宽。真实 UI 和用户答案判断仍不由此代替。
+
+
+## 独立 Claude 评审与修复复核通过
 
 曾实际执行 Claude Code print 模式，模型 claude-sonnet-4-6，safe-mode、strict-mcp-config、tools 空、no-session-persistence，输入为不含真实聊天和密钥的源码评审材料。返回 API 429，提示会话额度到限、11:40pm（Asia/Manila）重置；输入/输出 token 均为 0。未为了确认限额反复重跑。
 
 只读 reviewer 静态检查发现一个 P1：预期本地缺失的 os error 2/文件名包含 error 被当成硬错误。父会话先用行为夹具复现，再修复为按真实行首/ANSI 日志 severity 判断；保留未知警告硬失败。此检查不是 Claude，不能替代计划要求的 Claude 独立验收。
 
-尚未完成：额度恢复后用最终提交独立评审，并在真实 Claude Code 会话主动调用一次 search；用户自行使用已注册服务也可提供实际调用证据。客户端可连接、Python stdio 调用、reviewer 的结论均不冒充这两个条件。任务此门禁仍 blocked。
+额度恢复后针对 e734f5b 的最终实现执行独立评审：13 个完整源码文件输入在 900 秒超时，没有结论；只做一次回退，输入全部 19 个生产文件差异，没有缩减生产代码范围。claude-sonnet-4-6 进程 exit 0、stderr 0，verdict=fail，唯一 medium finding 为 `KeyStore::save` 固定 `keys.toml.tmp` 遗留后永久报 AlreadyExists。其余主要覆盖项通过，另有 rowid 可选列和旧 MediaBridge 流式路径两个上下文未验证项。
+
+该 finding 经真实文件系统回归先复现失败（artifact 258）。修复将 tempfile 从 dev 依赖移入正常依赖，使用同目录唯一 NamedTempFile、write_all 后 persist 原子替换；写入/替换失败只清理本次临时文件，不删除或覆盖未知旧文件。保留回归 `interrupted_sibling_does_not_block_or_get_overwritten_by_later_save`，确认实际值重载与旧文件原样保留。
+
+实际进程 smoke 使用隔离目录、仅合成密钥，输出 `PASS: interrupted sibling preserved; later save reloads; file 0600, directory 0700`。随后完整 Rust 门禁 807 passed/46 suites/11 ignored、clippy -D warnings、release build 均通过（artifact 261）。没有写真实 keystore、重新提取密钥或重签微信；throwaway example 与合成目录已清理。
+
+最终只读修复复核使用相同 Claude 模型、effort=medium、禁工具/会话持久化，提供 save 完整关键路径、依赖变更和原始上下文：SELECT 为 8 个基础列、条件追加两列、最后追加 rowid；归档 export 调用 resolve_parallel/collect，图片转换失败为 hard_failed，不经过旧 MediaBridge 的流式软失败路径。Claude exit 0、is_error=false，verdict=pass、findings=[]、unverified=[]，唯一缺陷 resolved、rowid resolved、媒体路径 resolved_as_described（父会话调用链证据佐证）；不是把 smoke 当静态评审。私有输入/结果位于 ROOT/claude-acceptance-pf6ahtan，文件 0600、目录 0700。
+
+因此独立 Claude 条件与真实模型 search 条件均通过。实际用户 UI 与三个答案的业务判断仍待 phase-5，不冒充整任务完成。

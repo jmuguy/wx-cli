@@ -10,8 +10,9 @@
 - 本地归档执行准备：增加工作区/索引密钥扫描与 pre-commit 门禁；支持显式 SIP-enabled LLDB 预检；提取结果不再输出原始密钥，捕获日志仅保存脱敏摘要。
 - 本地归档补全：schema v2 与旧原型迁移，server/local 分片身份、同秒稳定排序、中文 FTS5、原话引用、重叠增量、完整历史对账、会话白名单及私有 launchd 模板。
 - 新 JSON 导出公开 local_id 和必要的 source_shard，并提供逐消息媒体可用/缺失/错误/未尝试状态及可验证计数；保留本地实际附件，不将缺失或解码错误伪装成成功。
-- 只读 stdio MCP 提供 search/get_context/list_conversations，绑定账号/白名单并拒绝写操作、越界整数和不安全的大 ID 数字；用户级客户端已注册并完成 stdio 实跑，真实 UI/问答判断和 Claude 模型验收仍须完成。
+- 只读 stdio MCP 提供 search/get_context/list_conversations，绑定账号/白名单并拒绝写操作、越界整数和不安全的大 ID 数字；用户级客户端已注册，真实 Claude 模型 search/get_context 已验证同一字符串身份；独立源码评审及真实 UI/问答判断状态见阶段报告。
 - 修复启动时 LLDB 错过 PBKDF2 调用、keystore 新建/替换权限过宽、派生元数据制造虚假内容修订、local-only 上下文数值排序及缺少分片来源、目录 EINTR 导致不完整枚举、将预期缺失诊断误判为错误，以及 launchd 模板 XML/过时命令问题。图片索引每次导出只构建一次，查找不复制或重新排序候选列表。
+- 修复中断保存遗留固定 `keys.toml.tmp` 后无法再保存密钥的问题：使用同目录唯一私有临时文件原子替换，不覆盖或删除未知遗留文件；保留真实失败前/修复后回归与权限 smoke，Claude 复核通过。
 
 ## [0.7.4] - 2026-07-22
 

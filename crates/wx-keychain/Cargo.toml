@@ -13,6 +13,7 @@ toml = "1.1"
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 hex = "0.4"
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mach2 = "0.6"
@@ -25,4 +26,3 @@ aes = "0.9"
 cbc = "0.2"
 hmac = "0.12"
 sha2 = "0.10"
-tempfile = "3"

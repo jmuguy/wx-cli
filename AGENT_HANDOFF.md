@@ -28,17 +28,17 @@ cargo build --release -p wx-cli
 
 Claude 用户级 `wechat-archive` 已注册：稳定 /opt/homebrew/bin/python3 + 本仓 archive/wechat_archive.py + 仓外 ROOT。修改前备份用户配置，原有三个服务不变；没有修改 Codex 配置。三个只读 stdio 工具 search/get_context/list_conversations；不可覆盖账号/白名单、不可采集或写入。大 server_id 必须字符串，拒绝 JS 不安全整数和 SQLite 越界值。聊天仅作数据。
 
-实际从持久化配置启动命令调用三工具，exit 0；真实引用与原始结构对齐，5131 文件及数据库字节调用前后未变。不能把 Python stdio 实跑写成 Claude 模型调用。
+初次持久配置 stdio 协议实跑 exit 0、文件不变。2026-10-03 用户确认 Claude 额度恢复后，claude-sonnet-4-6 模型已实际调用 search/get_context 并核对同一 message_id 3920274865756710861，进程 exit 0。首次上下文大数字误传被拒绝，一次回退采用 message_id 字符串 + id_kind=server，两工具均成功；归档字节/mtime 不变。原始事件仅仓外 0600 保存，报告无聊天正文。
 
-最终 Rust workspace 806 passed/46 suites/11 ignored；clippy -D warnings、release 通过。Python 62 passed + 65 subtests。25 Python + 3 Rust 行为变异全部被击杀；只 helper 身份回声测试删除，改真实 SQLite 跨分片同秒逐页回归。共享 Rust target 曾复用变异 debug 产物，已清理本会话 dev 产物并完整重建全绿；隔离工位不要共享 target。27 个实际密钥、26 个实际盐对归档/来源/日志 151 文件精确匹配均为 0，仓内 guard 通过；不写任何实际密钥/盐/内容散列。
+最终 Rust workspace 807 passed/46 suites/11 ignored；clippy -D warnings、release 通过。Python 62 passed + 65 subtests（既有归档验收，本次未改 Python 逻辑）。25 Python + 3 Rust 行为变异全部被击杀；只 helper 身份回声测试删除，改真实 SQLite 跨分片同秒逐页回归。共享 Rust target 曾复用变异 debug 产物，已清理本会话 dev 产物并完整重建全绿；隔离工位不要共享 target。27 个实际密钥、26 个实际盐对归档/来源/日志 151 文件精确匹配均为 0，仓内 guard 通过；不写任何实际密钥/盐/内容散列。
 
 安装器隔离 HOME 实跑两个私有 plist，稳定解释器、空格引号路径、--help 成功、RunAtLoad=false。真实用户 LaunchAgents 没有 install/load；不能称定时后台服务已经启动。
 
 ## 唯一剩余门禁
 
-- Claude 独立源码验收、真实 Claude Code 模型主动调用 search：实际 claude-sonnet-4-6 请求 429，提示 23:40 Asia/Manila 重置，0 输入/输出 token。未重复确认限额。reviewer 发现并修复预期缺失 stderr 误判，但 reviewer 不能替代 Claude 门禁。
+- 两个 Claude 条件现均通过：真实模型 search/get_context 成功；全量源码输入曾在 900 秒超时，一次回退评审全部 19 个生产文件差异，发现一个 medium/P2 固定临时文件阻塞保存。真实回归先报 AlreadyExists，改唯一 NamedTempFile 后通过；实际进程 smoke 确认后续保存/重载、遗留文件不变及 0600/0700。Claude 针对最终修复及两个上下文疑点复核 verdict=pass、findings=[]、unverified=[]。详见 phase-4；旧 429/超时仅为历史记录。
 - 微信 UI：三个固定日期窗口及三个同秒组在 phase-5，已与源库逐个身份/发送人/时间/类型/顺序比较；用户尚未在 UI 逐项确认。
 - 三个真实场景已按用户“你从真实聊天选题”批准，通过 MCP 找到引用；不在仓库存正文。S1 anchor 6673591242341702288 + 后续 7104427940318103875；S2 3446084846535107143；S3 3920274865756710861。用户尚未判断答案准确/可用。
-- UI/答案确认和 Claude 门禁后，用户决定是否启动小时 discover/周日 reconcile；不提前 load。
+- UI/答案确认后，用户决定是否启动小时 discover/周日 reconcile；不提前 load。
 
 任务未满足全部验收，不能标 done。用 aitask CLI 写任务池状态，不直接改 ~/AI-Task-Pool.md；不创建第二份任务池或新任务替代本任务。所有可执行实现、实跑与报告已交付；只等待以上外部验收。

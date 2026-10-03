@@ -213,6 +213,7 @@ python3 archive/wechat_archive.py --root "$ROOT" status
 - 原文、发送人/会话显示名、本地 ISO 时间、server/local 身份、来源文件、修订和媒体状态均可引用。显示名、local_id、摘要、方向和媒体状态刷新不是原文编辑，不产生虚假内容修订。`revisions` 计数包含初始版本，不等于发生编辑的消息数。
 - 中文 ≥3 字使用 FTS5 trigram；短词使用转义后的字面 LIKE。`search`、`context`、`list-conversations`、`status` 和 MCP 使用 SQLite `mode=ro`/`query_only`，不创建或迁移归档。
 - MCP 的 server_id 超过 `2^53-1` 时必须传十进制字符串；不接受可能被 JS 舍入的 JSON 数字。字符串也必须落在 SQLite signed 64-bit 范围内。
+- Claude 调用 `get_context` 优先使用返回的字符串 `message_id`，并传 `id_kind="server"` 或 `"local"`。此路径已由真实 Claude 模型验证；不要把 ID 转为 JS Number。`server_id` 大数字误传会被明确拒绝，不会自动舍入后引用别的消息。
 - `discover` 使用本地 `wx-cli sessions --no-server` 仅发现白名单变化，随后逐会话增量。同步/发现/对账在读取前刷新本地解密缓存，不访问网络。
 
 ```bash

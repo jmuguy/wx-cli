@@ -89,8 +89,8 @@ impl KeyStore {
 
     /// Save to a specific path, creating parent directories as needed.
     ///
-    /// Uses atomic write (write to `.tmp` sibling, then `rename`) to prevent
-    /// partial TOML files on crash.
+    /// Atomically replace the destination using a unique private sibling.
+    /// An interrupted save's orphan must not block or be overwritten by later saves.
     pub fn save(&self, path: &Path) -> Result<(), KeychainError> {
         let parent_existed = path.parent().is_none_or(|p| p.exists());
         if let Some(parent) = path.parent() {
@@ -104,23 +104,10 @@ impl KeyStore {
         let content = toml::to_string_pretty(self)
             .map_err(|e| KeychainError::Store(format!("failed to serialize: {}", e)))?;
 
-        let tmp_path = path.with_extension("toml.tmp");
-        let mut options = fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        let mut file = options.open(&tmp_path)?;
-        file.write_all(content.as_bytes()).inspect_err(|_| {
-            let _ = fs::remove_file(&tmp_path);
-        })?;
-        drop(file);
-        fs::rename(&tmp_path, path).inspect_err(|_| {
-            // Clean up the temp file on rename failure.
-            let _ = fs::remove_file(&tmp_path);
-        })?;
+        let mut file =
+            tempfile::NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
+        file.write_all(content.as_bytes())?;
+        file.persist(path).map_err(|error| error.error)?;
 
         wx_paths::sudo::chown_to_sudo_user(path);
         if !parent_existed {
@@ -372,6 +359,29 @@ impl KeyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn interrupted_sibling_does_not_block_or_get_overwritten_by_later_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("keys.toml");
+        let mut store = KeyStore::default();
+        store.save(&path).unwrap();
+        let stale_path = path.with_extension("toml.tmp");
+        let interrupted_content = b"synthetic interrupted write";
+        fs::write(&stale_path, interrupted_content).unwrap();
+        let replacement_key = "33".repeat(32);
+        store.set("wxid_recovery", &replacement_key, "4.1.15", None, None);
+        store.save(&path).unwrap();
+        assert_eq!(
+            KeyStore::load(&path)
+                .unwrap()
+                .get("wxid_recovery")
+                .unwrap()
+                .data_key,
+            replacement_key
+        );
+        assert_eq!(fs::read(stale_path).unwrap(), interrupted_content);
+    }
 
     #[cfg(unix)]
     #[test]
