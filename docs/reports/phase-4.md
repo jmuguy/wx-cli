@@ -54,4 +54,4 @@ MCP 以 SQLite mode=ro/query_only 打开已有库，不创建、不迁移、不 
 
 最终只读修复复核使用相同 Claude 模型、effort=medium、禁工具/会话持久化，提供 save 完整关键路径、依赖变更和原始上下文：SELECT 为 8 个基础列、条件追加两列、最后追加 rowid；归档 export 调用 resolve_parallel/collect，图片转换失败为 hard_failed，不经过旧 MediaBridge 的流式软失败路径。Claude exit 0、is_error=false，verdict=pass、findings=[]、unverified=[]，唯一缺陷 resolved、rowid resolved、媒体路径 resolved_as_described（父会话调用链证据佐证）；不是把 smoke 当静态评审。私有输入/结果位于 ROOT/claude-acceptance-pf6ahtan，文件 0600、目录 0700。
 
-因此独立 Claude 条件与真实模型 search 条件均通过。实际用户 UI 与三个答案的业务判断仍待 phase-5，不冒充整任务完成。
+因此独立 Claude 条件与真实模型 search 条件均通过。三个答案的业务判断已由用户明确确认通过；实际微信 UI 窗口/同秒核对仍待 phase-5，不冒充整任务完成。

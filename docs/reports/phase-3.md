@@ -59,4 +59,4 @@ Rust 变异使用了独立源码副本，但曾共享 target，随后主仓门�
 
 安装器真实运行于隔离 HOME，含空格/引号路径；两个 plist 均 0600、RunAtLoad=false，渲染命令实际 `--help` exit 0。解释器为稳定 `/opt/homebrew/bin/python3`；没有安装或 load 真实用户 LaunchAgents。每小时 discover、周日 04:17 reconcile 的自动启动仍由用户决定，不声称后台定时归档已经运行。
 
-技术实现与实跑已完成。Claude 独立源码评审及真实模型 MCP 调用均已通过（phase-4）；微信 UI 和三个问答的人为判断仍待确认（phase-5）。任务不得标 done。
+技术实现与实跑已完成。Claude 独立源码评审及真实模型 MCP 调用均已通过（phase-4）；三个问答的用户业务判断已通过，微信 UI 窗口/同秒核对仍待确认（phase-5）。任务不得标 done。
