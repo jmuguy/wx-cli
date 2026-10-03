@@ -441,6 +441,8 @@ mod tests {
             Message {
                 sort_seq: 1,
                 server_id: 2,
+                local_id: 1,
+                source_shard: None,
                 msg_type: 1,
                 sub_type: 0,
                 sender: "wxid_me".to_string(),
@@ -467,6 +469,8 @@ mod tests {
             Message {
                 sort_seq: 1,
                 server_id: 2,
+                local_id: 1,
+                source_shard: None,
                 msg_type: 1,
                 sub_type: 0,
                 sender: "testuser001".to_string(),
@@ -489,6 +493,8 @@ mod tests {
             Message {
                 sort_seq: 1,
                 server_id: 2,
+                local_id: 1,
+                source_shard: None,
                 msg_type: 1,
                 sub_type: 0,
                 sender: "wxid_friend".to_string(),
@@ -536,6 +542,8 @@ mod tests {
         Message {
             sort_seq: 1,
             server_id: 1,
+            local_id: 1,
+            source_shard: None,
             msg_type: 1,
             sub_type: 0,
             sender: sender.to_string(),

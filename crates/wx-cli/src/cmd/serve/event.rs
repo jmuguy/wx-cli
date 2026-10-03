@@ -96,6 +96,8 @@ mod tests {
                 message: wx_db::Message {
                     sort_seq: 1,
                     server_id: 2,
+                    local_id: 1,
+                    source_shard: None,
                     msg_type: 1,
                     sub_type: 0,
                     sender: "wxid_me".to_string(),

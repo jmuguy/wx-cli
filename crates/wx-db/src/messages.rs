@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use rusqlite::types::ValueRef;
 use rusqlite::Connection;
@@ -120,6 +121,9 @@ fn prepare_shard_query<'a>(
     if has_compress_col {
         select_cols.push_str(", m.compress_content");
     }
+    // Always last so optional columns keep their indices: the SQLite rowid
+    // is the stable local identity for messages without a server_id.
+    select_cols.push_str(", m.rowid");
 
     Some(PreparedShard {
         conn,
@@ -127,6 +131,23 @@ fn prepare_shard_query<'a>(
         has_ct_col,
         has_compress_col,
     })
+}
+
+fn compare_message_order(a: &Message, b: &Message) -> std::cmp::Ordering {
+    (
+        a.sort_seq,
+        a.create_time,
+        a.server_id,
+        a.local_id,
+        a.source_shard.as_deref(),
+    )
+        .cmp(&(
+            b.sort_seq,
+            b.create_time,
+            b.server_id,
+            b.local_id,
+            b.source_shard.as_deref(),
+        ))
 }
 
 impl WechatDb {
@@ -208,16 +229,8 @@ impl WechatDb {
 
         // Sort all messages by (sort_seq, create_time, server_id) in requested direction
         match query.order {
-            SortOrder::Asc => {
-                all_messages.sort_unstable_by_key(|m| (m.sort_seq, m.create_time, m.server_id))
-            }
-            SortOrder::Desc => all_messages.sort_unstable_by(|a, b| {
-                (b.sort_seq, b.create_time, b.server_id).cmp(&(
-                    a.sort_seq,
-                    a.create_time,
-                    a.server_id,
-                ))
-            }),
+            SortOrder::Asc => all_messages.sort_unstable_by(compare_message_order),
+            SortOrder::Desc => all_messages.sort_unstable_by(|a, b| compare_message_order(b, a)),
         }
 
         // Apply post-filters based on mode
@@ -399,7 +412,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq > ?1 \
-                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC",
+                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC, m.rowid ASC",
                 select_cols = prepared.select_cols,
                 table = table_name,
             );
@@ -440,7 +453,7 @@ impl WechatDb {
         }
 
         // Sort ASC by compound key
-        all_messages.sort_unstable_by_key(|m| (m.sort_seq, m.create_time, m.server_id));
+        all_messages.sort_unstable_by(compare_message_order);
 
         // Apply filters then take(limit)
         apply_post_filters(&mut all_messages, &query.keyword, query.msg_type_filter);
@@ -491,7 +504,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq < ?1 \
-                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC \
+                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC \
                  LIMIT ?2",
                 select_cols = prepared.select_cols,
                 table = table_name,
@@ -515,7 +528,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq = ?1 \
-                 ORDER BY m.create_time ASC, m.server_id ASC",
+                 ORDER BY m.create_time ASC, m.server_id ASC, m.rowid ASC",
                 select_cols = prepared.select_cols,
                 table = table_name,
             );
@@ -538,7 +551,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq > ?1 \
-                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC \
+                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC, m.rowid ASC \
                  LIMIT ?2",
                 select_cols = prepared.select_cols,
                 table = table_name,
@@ -559,17 +572,15 @@ impl WechatDb {
 
         // Sort and truncate each segment across shards
         // Before: sort DESC then take(context), then reverse to ASC
-        before.sort_unstable_by(|a, b| {
-            (b.sort_seq, b.create_time, b.server_id).cmp(&(a.sort_seq, a.create_time, a.server_id))
-        });
+        before.sort_unstable_by(|a, b| compare_message_order(b, a));
         before.truncate(context);
         before.reverse();
 
-        // Pivot: sort ASC by (create_time, server_id)
-        pivot.sort_unstable_by_key(|m| (m.create_time, m.server_id));
+        // Pivot rows share sort_seq; apply the same stable identity tiebreakers.
+        pivot.sort_unstable_by(compare_message_order);
 
         // After: sort ASC then take(context)
-        after.sort_unstable_by_key(|m| (m.sort_seq, m.create_time, m.server_id));
+        after.sort_unstable_by(compare_message_order);
         after.truncate(context);
 
         // Merge: before + pivot + after
@@ -722,7 +733,7 @@ impl WechatDb {
                  WHERE (m.sort_seq < ?1) \
                     OR (m.sort_seq = ?1 AND m.create_time < ?2) \
                     OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.server_id < ?3) \
-                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC \
+                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC \
                  LIMIT ?4",
                 select_cols = prepared.select_cols,
                 table = table_name,
@@ -748,7 +759,7 @@ impl WechatDb {
                  WHERE (m.sort_seq > ?1) \
                     OR (m.sort_seq = ?1 AND m.create_time > ?2) \
                     OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.server_id > ?3) \
-                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC \
+                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC, m.rowid ASC \
                  LIMIT ?4",
                 select_cols = prepared.select_cols,
                 table = table_name,
@@ -768,13 +779,11 @@ impl WechatDb {
         }
 
         // Sort and truncate
-        before.sort_unstable_by(|a, b| {
-            (b.sort_seq, b.create_time, b.server_id).cmp(&(a.sort_seq, a.create_time, a.server_id))
-        });
+        before.sort_unstable_by(|a, b| compare_message_order(b, a));
         before.truncate(context);
         before.reverse();
 
-        after.sort_unstable_by_key(|m| (m.sort_seq, m.create_time, m.server_id));
+        after.sort_unstable_by(compare_message_order);
         after.truncate(context);
 
         // Merge: before + pivot + after
@@ -900,7 +909,8 @@ fn build_regular_shard_sql(
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.create_time >= ?1 AND m.create_time <= ?2 \
-                 ORDER BY m.sort_seq {order}, m.create_time {order}, m.server_id {order}",
+                 ORDER BY m.sort_seq {order}, m.create_time {order}, m.server_id {order}, \
+                 m.rowid {order}",
                 table = table_name,
                 order = order.sql_keyword(),
             );
@@ -917,7 +927,7 @@ fn build_regular_shard_sql(
                      LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                      WHERE m.create_time >= ?1 AND m.create_time <= ?2 \
                        AND (m.local_type & 4294967295) = ?3 \
-                     ORDER BY m.sort_seq {order} \
+                     ORDER BY m.sort_seq {order}, m.rowid {order} \
                      LIMIT ?4",
                     table = table_name,
                     order = order.sql_keyword(),
@@ -932,7 +942,7 @@ fn build_regular_shard_sql(
                      FROM [{table}] m \
                      LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                      WHERE m.create_time >= ?1 AND m.create_time <= ?2 \
-                     ORDER BY m.sort_seq {order} \
+                     ORDER BY m.sort_seq {order}, m.rowid {order} \
                      LIMIT ?3",
                     table = table_name,
                     order = order.sql_keyword(),
@@ -1025,6 +1035,11 @@ fn collect_rows(
     skipped: &mut usize,
     shard_warnings: &mut Vec<ShardWarning>,
 ) {
+    // Computed once per shard (not per row) so positive-server_id rows
+    // never pay for provenance they will not use.
+    let shard_basename = Path::new(shard_path)
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str);
     loop {
         match rows.next() {
             Ok(Some(row)) => {
@@ -1035,6 +1050,7 @@ fn collect_rows(
                     prepared.has_compress_col,
                     is_group,
                     talker,
+                    shard_basename,
                 ) {
                     Ok(msg) => all_messages.push(msg),
                     Err(_) => {
@@ -1061,6 +1077,7 @@ fn decode_message_row(
     has_compress_col: bool,
     is_group: bool,
     talker: &str,
+    shard_basename: Option<&str>,
 ) -> Result<Message, DbError> {
     let sort_seq: i64 = row.get(0)?;
     let server_id: i64 = row.get(1)?;
@@ -1103,6 +1120,10 @@ fn decode_message_row(
         None
     };
 
+    // m.rowid (always selected last): stable local identity within the shard.
+    let rowid_idx = 8 + (has_ct_col as usize) + (has_compress_col as usize);
+    let local_id: i64 = row.get(rowid_idx)?;
+
     // Decode content (zstd decompression if needed)
     let decoded_text = decode_content(&raw_content, wcdb_ct)?;
 
@@ -1131,9 +1152,19 @@ fn decode_message_row(
         compress_content.as_deref(),
     );
 
+    // Messages without a usable server_id fall back to a local identity
+    // namespace scoped by the stable shard basename (never a full path).
+    let source_shard = if server_id <= 0 {
+        shard_basename.map(str::to_string)
+    } else {
+        None
+    };
+
     Ok(Message {
         sort_seq,
         server_id,
+        local_id,
+        source_shard,
         msg_type,
         sub_type,
         sender,

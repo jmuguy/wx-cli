@@ -307,6 +307,60 @@ fn create_shard_1(path: &Path) {
 // ---- Tests ----
 
 #[test]
+fn local_only_same_second_rows_keep_shard_identity_across_pages() {
+    let dir = create_fixture();
+    let first = dir.path().join("message/message_0.db");
+    {
+        let conn = Connection::open(&first).unwrap();
+        conn.execute_batch(&format!(
+            "DELETE FROM \"{ALICE_TABLE}\" WHERE rowid > 3;
+             UPDATE \"{ALICE_TABLE}\" SET server_id=0,sort_seq=100,create_time=1700000100;"
+        ))
+        .unwrap();
+    }
+    fs::copy(&first, dir.path().join("message/message_1.db")).unwrap();
+    let db = WechatDb::open(dir.path()).unwrap();
+    let query = MessageQuery::for_talker("wxid_alice").order(SortOrder::Asc);
+    let result = db.query_messages(&query).unwrap();
+    assert_eq!(result.stats.skipped, 0);
+    let identities: Vec<_> = result
+        .items
+        .iter()
+        .map(|message| {
+            assert_eq!(message.server_id, 0);
+            (message.source_shard.as_deref().unwrap(), message.local_id)
+        })
+        .collect();
+    assert_eq!(
+        identities,
+        vec![
+            ("message_0.db", 1),
+            ("message_1.db", 1),
+            ("message_0.db", 2),
+            ("message_1.db", 2),
+            ("message_0.db", 3),
+            ("message_1.db", 3),
+        ]
+    );
+    let paged: Vec<_> = (0..identities.len())
+        .flat_map(|offset| {
+            db.query_messages(&query.clone().limit(1).offset(offset))
+                .unwrap()
+                .items
+                .into_iter()
+                .map(|message| (message.source_shard.unwrap(), message.local_id))
+        })
+        .collect();
+    assert_eq!(
+        paged,
+        identities
+            .into_iter()
+            .map(|(shard, local_id)| (shard.to_owned(), local_id))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn messages_routing_alice_query_hits_shard_0_only() {
     let dir = create_fixture();
     let db = WechatDb::open(dir.path()).unwrap();

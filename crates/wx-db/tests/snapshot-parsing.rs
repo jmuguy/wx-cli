@@ -46,7 +46,7 @@ fn load_fixture(fixture_name: &str) -> FixtureResult {
         .prepare(
             "SELECT sort_seq, server_id, local_type, sender, talker,
                     create_time, message_content, packed_info_data,
-                    status, wcdb_ct, compress_content, is_group
+                    status, wcdb_ct, compress_content, is_group, rowid
              FROM fixture_messages ORDER BY sort_seq",
         )
         .expect("failed to prepare SELECT");
@@ -78,10 +78,11 @@ fn load_fixture(fixture_name: &str) -> FixtureResult {
         let wcdb_ct: Option<i32> = row.get(9).unwrap();
         let compress_content: Option<Vec<u8>> = row.get(10).unwrap();
         let is_group: bool = row.get(11).unwrap();
-
+        let local_id: i64 = row.get(12).unwrap();
         match decode_message_for_test(
             sort_seq,
             server_id,
+            local_id,
             local_type,
             &sender,
             &talker,
@@ -92,6 +93,7 @@ fn load_fixture(fixture_name: &str) -> FixtureResult {
             wcdb_ct,
             compress_content.as_deref(),
             is_group,
+            None,
         ) {
             Ok(msg) => messages.push(msg),
             Err(e) => {

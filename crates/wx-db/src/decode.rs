@@ -172,6 +172,7 @@ pub fn encode_room_data_for_test(members: &[(&str, Option<&str>)]) -> Vec<u8> {
 pub fn decode_message_for_test(
     sort_seq: i64,
     server_id: i64,
+    local_id: i64,
     local_type: i64,
     sender: &str,
     talker: &str,
@@ -182,6 +183,7 @@ pub fn decode_message_for_test(
     wcdb_ct: Option<i32>,
     compress_content: Option<&[u8]>,
     is_group: bool,
+    shard_basename: Option<&str>,
 ) -> Result<Message, DbError> {
     // Decode content (zstd decompression if needed)
     let decoded_text = decode_content(raw_content, wcdb_ct)?;
@@ -211,9 +213,19 @@ pub fn decode_message_for_test(
         compress_content,
     );
 
+    // Messages without a usable server_id fall back to a local identity
+    // namespace scoped by the stable shard basename (never a full path).
+    let source_shard = if server_id <= 0 {
+        shard_basename.map(str::to_string)
+    } else {
+        None
+    };
+
     Ok(Message {
         sort_seq,
         server_id,
+        local_id,
+        source_shard,
         msg_type,
         sub_type,
         sender,

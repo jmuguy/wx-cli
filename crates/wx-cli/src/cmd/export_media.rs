@@ -10,6 +10,63 @@ use wx_db::{Message, MessageContent};
 #[cfg(test)]
 use wx_media::DatDecryptOptions;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaState {
+    Available,
+    Missing,
+    Error,
+    MetadataOnly,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct MediaStatus {
+    pub state: MediaState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+impl MediaStatus {
+    pub const fn new(state: MediaState, reason: Option<&'static str>) -> Self {
+        Self { state, reason }
+    }
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct MediaSummary {
+    pub version: u8,
+    pub mode: &'static str,
+    pub expected: usize,
+    pub available: usize,
+    pub missing: usize,
+    pub errors: usize,
+    pub not_attempted: usize,
+}
+
+impl MediaSummary {
+    pub fn from_statuses(statuses: &[Option<MediaStatus>], no_media: bool) -> Self {
+        let mut summary = Self {
+            version: 1,
+            mode: if no_media { "metadata_only" } else { "enabled" },
+            expected: 0,
+            available: 0,
+            missing: 0,
+            errors: 0,
+            not_attempted: 0,
+        };
+        for status in statuses.iter().flatten() {
+            summary.expected += 1;
+            match status.state {
+                MediaState::Available => summary.available += 1,
+                MediaState::Missing => summary.missing += 1,
+                MediaState::Error => summary.errors += 1,
+                MediaState::MetadataOnly => summary.not_attempted += 1,
+            }
+        }
+        summary
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct MediaAsset {
     pub kind: MediaKind,
@@ -139,7 +196,13 @@ impl MediaBridge {
         };
 
         let (image_data, image_ext, wxgf_transcoded, wxgf_fallback) =
-            export_image_bytes(decoded.data, &decoded.ext);
+            match export_image_bytes(decoded.data, &decoded.ext) {
+                Ok(result) => result,
+                Err(error) => {
+                    eprintln!("warning: image conversion failed for md5={md5}: {error}");
+                    return vec![];
+                }
+            };
 
         let filename = format!("{}.{}", md5, image_ext);
         if !self.exported.insert(filename.clone()) {
@@ -424,21 +487,16 @@ impl MediaBridge {
 pub fn export_image_bytes(
     decoded_data: Vec<u8>,
     decoded_ext: &str,
-) -> (Vec<u8>, String, bool, bool) {
+) -> Result<(Vec<u8>, String, bool, bool), wx_media::MediaError> {
     if decoded_ext != "wxgf" {
-        return (decoded_data, decoded_ext.to_string(), false, false);
+        return Ok((decoded_data, decoded_ext.to_string(), false, false));
     }
-
-    match wx_media::transcode_wxgf(&decoded_data) {
-        Ok(transcoded) if transcoded.transcoded => {
-            (transcoded.data, transcoded.ext.to_string(), true, false)
-        }
-        Ok(_) => (decoded_data, "wxgf".to_string(), false, true),
-        Err(e) => {
-            eprintln!("warning: wxgf image export kept as .wxgf due to transcode error: {e}");
-            (decoded_data, "wxgf".to_string(), false, true)
-        }
-    }
+    let transcoded = wx_media::transcode_wxgf(&decoded_data)?;
+    Ok(if transcoded.transcoded {
+        (transcoded.data, transcoded.ext.to_string(), true, false)
+    } else {
+        (decoded_data, "wxgf".to_string(), false, true)
+    })
 }
 
 #[cfg(test)]
@@ -478,6 +536,8 @@ mod tests {
         let msg = Message {
             sort_seq: 0,
             server_id: 1,
+            local_id: 1,
+            source_shard: None,
             msg_type: 43,
             sub_type: 0,
             sender: "wxid_test".into(),
@@ -582,44 +642,6 @@ mod tests {
             std::env::remove_var("FFMPEG_PATH");
         }
         wx_media::reset_ffmpeg_cache();
-    }
-
-    #[test]
-    fn test_resolve_image_keeps_wxgf_when_transcode_errors() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let root = tmp.path();
-        let talker = "wxid_other";
-        let md5 = "0badf00d0badf00d0badf00d0badf00d";
-        let xor_key = 0xa5;
-        let wxgf = b"wxgf".to_vec();
-
-        write_xor_dat(root, talker, md5, &wxgf, xor_key);
-
-        let output_media = root.join("output");
-        std::fs::create_dir_all(&output_media).unwrap();
-
-        let mut bridge = MediaBridge::new(
-            root.join("attach"),
-            root.join("media"),
-            root.join("file"),
-            root.join("video"),
-            root.join("hardlink.db"),
-            output_media.clone(),
-            wx_media::DatDecryptOptions {
-                v2_aes_key: None,
-                xor_key: Some(xor_key),
-            },
-        );
-
-        let assets = bridge.resolve_image(md5, talker);
-        assert_eq!(assets.len(), 1);
-        assert_eq!(assets[0].filename, format!("{md5}.wxgf"));
-        assert_eq!(bridge.stats.wxgf_transcoded, 0);
-        assert_eq!(bridge.stats.wxgf_fallback, 1);
-        assert_eq!(
-            std::fs::read(output_media.join(format!("{md5}.wxgf"))).unwrap(),
-            wxgf
-        );
     }
 
     fn write_xor_dat(

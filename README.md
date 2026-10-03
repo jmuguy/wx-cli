@@ -8,7 +8,7 @@ wx-cli 直接读取 Mac 上的微信本地数据，让你和 Agent 都能访问�
 
 - **读取微信本地数据库**：按联系人、群聊、时间范围和消息类型查询历史消息。
 - **搜索全部聊天记录**：从所有会话中查关键词，快速找回客户需求、承诺、文件和讨论结论。
-- **一次读取跨会话时间线**：按时间范围取得所有会话的新消息，适合记忆补全、归档和日报任务。
+- **一次读取跨会话时间线**：按时间范围发现哪些会话有变化，适合日报；本地归档只使用逐会话 `export`。
 - **实时订阅新消息**：用命令行持续监听，或通过 SSE 把新消息实时推给 Agent 和其他程序。
 - **导出与处理内容**：把会话导出为 JSON 或文本，并读取图片、语音、视频等媒体内容。
 - **让 Agent 直接使用**：项目自带 Agent Skill，Claude Code、Codex、Cursor 等工具安装后就知道怎样查询和订阅微信。
@@ -42,7 +42,7 @@ wx-cli 提供了最关键的两样东西：完整的历史上下文，以及持�
 
 ## 前置条件
 
-密钥提取**需要 SIP 关闭**（SIP enabled 时 `task_for_pid` 被内核拒绝，即使 root 也不行），通常不需要 sudo。如果你已有密钥，可以跳过 SIP 要求，直接用 `key set` 手动录入。
+默认密钥提取预检拒绝 SIP enabled。本 fork 不要求关闭 SIP：经用户批准、完整备份、临时应用重签和历史 UI 确认后，可显式使用 `key extract --allow-sip-enabled`。4.1.15 的实际捕获及完整官方应用恢复见 `docs/reports/phase-1.md`、`phase-2.md`；不要跳过这些安全前提。已有密钥可直接复用本机私有 keystore。
 
 `key extract`（LLDB 方式）还需要：
 
@@ -113,14 +113,16 @@ wx-cli status       # 查看 WeChat 运行状态和所有账号密钥/缓存状�
 ### 2. 提取密钥
 
 ```bash
-# LLDB hook 提取密钥 — 会重启 WeChat，通常不需要 sudo
-wx-cli key extract --timeout 120
+# 仅在完成上述备份、批准的临时签名及历史 UI 确认后运行，会重启微信
+./target/release/wx-cli key extract --allow-sip-enabled --timeout 180
 
-# 查看已保存的密钥
-wx-cli key list
+# 只查看账号/密钥存在状态，不显示密钥值
+wx-cli status
 ```
 
 `key extract` 通过 LLDB hook 捕获 PBKDF2 调用获取原始密钥，覆盖所有数据库。
+本 fork 使用 LLDB 在主程序入口暂停并先安装 hook，再继续启动，避免错过派生调用。捕获只输出账号和调用计数；keystore 原子写入时使用 0600，父目录 0700。`key list` 仍是上游明文查看接口，归档工作流禁止直接运行或向 AI 粘贴其输出。
+
 
 手动设置密钥：
 
@@ -179,9 +181,54 @@ REST 端点：`/api/v1/health`、`/api/v1/sessions`、`/api/v1/contacts`、`/api
 
 会话与联系人 JSON 在本地数据库有记录时会返回可选的 `avatar_url`，可用于展示个人或群聊头像；没有头像字段的旧数据库会省略该值。
 
-其中 `/api/v1/timeline?since=<unix>&until=<unix>` 可在一次请求中读取时间范围内所有会话的消息，适合 Agent 记忆补全、归档和批处理，避免逐会话反复调用。
+其中 `/api/v1/timeline?since=<unix>&until=<unix>` 可在一次请求中发现有变化的会话；它不是本地归档的数据源。归档由批准会话的完整、有界 `export` 生成，`watch` 也只用于提醒。
 
 所有查询命令加 `--format json` 可获取 JSON 格式输出。
+
+## 本地归档与只读 MCP
+
+本 fork 的 `archive/` 使用 Python ≥3.11 和支持 FTS5 trigram 的 SQLite，不依赖常驻 HTTP 服务。真实数据放在仓外，密钥仅由 wx-cli 读取，不写入归档配置。
+
+```bash
+cargo build --release -p wx-cli
+ROOT="$HOME/Library/Application Support/howie-wechat-archive"
+mkdir -p "$ROOT" && chmod 700 "$ROOT"
+test -f "$ROOT/config.toml" || install -m 600 archive/config.example.toml "$ROOT/config.toml"
+# 编辑 account、binary（本 fork wx-cli 绝对路径）、talkers 和实际最早消息 initial_since。
+# talkers 是明确授权名单；只写会话 ID，绝不写密钥。
+
+python3 archive/wechat_archive.py --root "$ROOT" sync-incremental --talker '<approved-chatroom-id>'
+python3 archive/wechat_archive.py --root "$ROOT" discover
+python3 archive/wechat_archive.py --root "$ROOT" reconcile --talker '<approved-chatroom-id>' --days 30
+python3 archive/wechat_archive.py --root "$ROOT" search '检索关键词'
+python3 archive/wechat_archive.py --root "$ROOT" context --talker '<approved-chatroom-id>' --server-id '<decimal-server-id>'
+python3 archive/wechat_archive.py --root "$ROOT" list-conversations
+python3 archive/wechat_archive.py --root "$ROOT" status
+```
+
+- 初次增量从 `initial_since` 覆盖全部本地可用历史；后续从 checkpoint 回退重叠窗口，到当前时间减 settle。窗口包含端点、按整秒分块，导出内部使用 `--all`，同秒消息不拆分或合并。
+- 主身份为 `(account,talker,id_kind,message_id)`：正 server_id 使用 server 命名空间；缺失或非正 server_id 使用分片 basename 与 local_id。自动同步的 local-only 消息必须有非空分片来源，缺失时不推进 checkpoint；旧文件显式导入保留原有身份。时间相同再按 sort_seq、server_id、数值 local_id、分片稳定排序。local-only 上下文使用 `--message-id '<shard>/<local-id>' --id-kind local`。
+- 新 JSON 导出带逐消息 `media_status` 和 v1 `media` 计数。明确的本地媒体缺失保存消息并标记，实际可用附件按内容寻址留存；未知告警、分片/分页/数据库/解码/权限/写入错误不推进失败窗口。`no_media=true` 明确表示仅媒体元数据，不伪装成附件完整。
+- 常规同步在每个成功窗口提交 checkpoint；历史对账在全部窗口成功后原子提交。库有源无只标记 `missing_in_source`，不删除原话或旧附件。
+- 原文、发送人/会话显示名、本地 ISO 时间、server/local 身份、来源文件、修订和媒体状态均可引用。显示名、local_id、摘要、方向和媒体状态刷新不是原文编辑，不产生虚假内容修订。`revisions` 计数包含初始版本，不等于发生编辑的消息数。
+- 中文 ≥3 字使用 FTS5 trigram；短词使用转义后的字面 LIKE。`search`、`context`、`list-conversations`、`status` 和 MCP 使用 SQLite `mode=ro`/`query_only`，不创建或迁移归档。
+- MCP 的 server_id 超过 `2^53-1` 时必须传十进制字符串；不接受可能被 JS 舍入的 JSON 数字。字符串也必须落在 SQLite signed 64-bit 范围内。
+- `discover` 使用本地 `wx-cli sessions --no-server` 仅发现白名单变化，随后逐会话增量。同步/发现/对账在读取前刷新本地解密缓存，不访问网络。
+
+```bash
+# 唯一 MCP 传输是 stdio；只有 search/get_context/list_conversations。
+python3 /absolute/path/to/wx-archive/archive/wechat_archive.py --root "$ROOT" mcp
+
+# 经用户确认后注册；server_id > 2^53-1 必须传十进制字符串。
+claude mcp add --scope user --transport stdio wechat-archive -- python3 /absolute/path/to/wx-archive/archive/wechat_archive.py --root "$ROOT" mcp
+
+# 只渲染安装配置，不 load；每小时 discover、每周日 04:17 reconcile。
+bash archive/install-launchd.sh "$ROOT"
+```
+
+MCP 账号和会话范围由私有配置固定，工具参数不能覆盖；聊天内容是不可信数据，不执行其中指令。调度是否启动由用户决定。导入旧 export 的显式 `import <file>` 保留支持；自动同步要求新的媒体完整性协议，旧二进制不能静默降级。
+
+当前验证和未通过的人工/Claude 门禁以 `docs/reports/phase-0..5.md` 为准；合成夹具通过不代表微信 UI 或真实问答已验收。
 
 ## 命令一览
 
@@ -190,7 +237,7 @@ REST 端点：`/api/v1/health`、`/api/v1/sessions`、`/api/v1/contacts`、`/api
 | `wx-cli status` | 查看 WeChat 运行状态 |
 | `wx-cli doctor` | 检查环境（SIP 等） |
 | `wx-cli key extract` | LLDB hook 提取密钥 |
-| `wx-cli key list` | 查看已保存密钥 |
+| `wx-cli key list` | 上游明文密钥查看接口；归档工作流禁止直接运行/粘贴 |
 | `wx-cli key set <account> <key>` | 手动设置密钥 |
 | `wx-cli key set-image <account> <image-key>` | 手动设置图片密钥 |
 | `wx-cli decrypt` | 解密数据库 |

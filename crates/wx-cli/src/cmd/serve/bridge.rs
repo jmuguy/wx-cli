@@ -282,6 +282,8 @@ mod tests {
             message: wx_db::Message {
                 sort_seq,
                 server_id: 0,
+                local_id: sort_seq,
+                source_shard: Some("message_0.db".to_string()),
                 msg_type: 1,
                 sub_type: 0,
                 sender: String::new(),
@@ -410,6 +412,8 @@ mod tests {
             wx_db::Message {
                 sort_seq: 1,
                 server_id: 1,
+                local_id: 1,
+                source_shard: None,
                 msg_type: 1,
                 sub_type: 0,
                 sender: "wxid_spam".to_string(),
@@ -421,6 +425,8 @@ mod tests {
             wx_db::Message {
                 sort_seq: 2,
                 server_id: 2,
+                local_id: 2,
+                source_shard: None,
                 msg_type: 1,
                 sub_type: 0,
                 sender: "wxid_normal".to_string(),

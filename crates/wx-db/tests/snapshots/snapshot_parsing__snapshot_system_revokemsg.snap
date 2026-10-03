@@ -5,6 +5,7 @@ expression: result.messages
 ---
 - sort_seq: 1
   server_id: 100001
+  local_id: 1
   msg_type: 10000
   sub_type: 0
   sender: ""
@@ -15,6 +16,7 @@ expression: result.messages
   status: 0
 - sort_seq: 2
   server_id: 100002
+  local_id: 2
   msg_type: 10000
   sub_type: 0
   sender: ""
@@ -25,6 +27,7 @@ expression: result.messages
   status: 0
 - sort_seq: 3
   server_id: 100003
+  local_id: 3
   msg_type: 10000
   sub_type: 0
   sender: ""
@@ -35,6 +38,7 @@ expression: result.messages
   status: 0
 - sort_seq: 4
   server_id: 100004
+  local_id: 4
   msg_type: 10000
   sub_type: 0
   sender: ""

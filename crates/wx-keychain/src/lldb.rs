@@ -25,8 +25,8 @@ pub struct CaptureResult {
 ///
 /// 1. Read salts from ALL account `message_0.db` files.
 /// 2. Kill WeChat.
-/// 3. Launch LLDB with `-w -n WeChat` (waits for WeChat to start).
-/// 4. Open WeChat; user logs in.
+/// 3. Launch WeChat under LLDB, stopped at entry.
+/// 4. Install the PBKDF2 hook before resuming; user logs in.
 /// 5. Stream LLDB output, parsing PBKDF2 calls.
 /// 6. For each call with rounds=256000, check its salt against ALL known salts.
 /// 7. On match, validate the full key via HMAC. Return key + matched account.
@@ -73,25 +73,22 @@ pub async fn capture_key(
     // Prepare LLDB output file.
     let output_path = wx_paths::AppPaths::lldb_output_file();
 
-    // Launch LLDB in wait mode.
+    // Stop at entry before installing the hook; attaching after open can miss startup keys.
     let mut lldb = AsyncCommand::new("lldb")
         .args([
-            "-w",
-            "-n",
-            "WeChat",
+            "/Applications/WeChat.app/Contents/MacOS/WeChat",
+            "-o",
+            "process launch --stop-at-entry",
             "-o",
             &format!("command script import {}", script_path.display()),
             "-o",
             "capture_keys",
         ])
+        .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|e| KeychainError::Other(format!("failed to start lldb: {e}")))?;
-
-    // Brief pause then open WeChat.
-    tokio::time::sleep(Duration::from_secs(1)).await;
-    let _ = Command::new("open").arg("-a").arg("WeChat").output();
 
     eprintln!("Waiting for WeChat to start and trigger PBKDF2 calls...");
     eprintln!("Please log in to WeChat when prompted.");

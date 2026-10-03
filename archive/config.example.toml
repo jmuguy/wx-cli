@@ -1,0 +1,42 @@
+# howie-wechat-archive 配置示例（阶段 3 会话白名单 + 增量调度）。
+# 复制为 <archive-root>/config.toml 后按需修改；缺失必需键时归档层直接
+# 报错（fail closed），绝不静默归档全部会话。
+#
+# 本文件只驱动本地 wx-cli 调用，归档层零网络；密钥永远不写进这里，
+# 由 wx-cli 保存到本机权限 600 的 config/keys.toml；不是系统钥匙串。
+
+[archive]
+# 要归档的微信账号（账号目录名或基础 wxid）。
+account = "wxid_e1xwpk9mdgvf22_1110"
+
+# 本仓库 cargo build --release 产出的 wx 二进制的绝对路径。
+# 不要用 ~/.local/bin/wx（那是旧版 0.6.3，另装的 wx-cli-again）。
+binary = "/Users/jmuguy/Documents/Coding/wx-archive/target/release/wx-cli"
+
+# 会话白名单（opt-in）：只有列出的 talker/chatroom ID 会被归档；
+# 未列入的会话即使 wx sessions 返回也不会碰。初始只放核对群。
+talkers = ["45416093717@chatroom"]
+
+# 尚无 checkpoint 时的首次同步起点（unix 秒），应取实际最早可用消息。
+# 本机核对群最早记录 = 2023-11-03 16:36:54 +08:00，覆盖全部本地历史。
+initial_since = 1699000614
+
+# 增量重叠秒数：从 checkpoint 往回多重导一段，吸收迟到写入；
+# 重叠消息按 (account, talker, server_id) 身份去重，不会重复入库。
+overlap_seconds = 3600
+
+# 结尾沉降秒数：增量只同步到 now - settle，避免抓到写入中的消息。
+settle_seconds = 120
+
+# 单次 `wx export --all` 的最大包含式窗口（秒）；更大范围自动分块，
+# 分块按整秒对齐，同一秒不拆分。这里用七天；API 默认一天。
+chunk_seconds = 604800
+
+# 周期对账回看的 days 数（reconcile）。
+reconcile_days = 30
+
+# true 时导出跳过媒体载荷（仅元数据），更快。
+no_media = false
+
+# 定时任务：launchd/ 里只有 plist 模板和 install-launchd.sh 安装脚本，
+# 是否 launchctl load 由用户决定，本配置不装、不启动任何服务。

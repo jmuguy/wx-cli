@@ -232,6 +232,15 @@ pub struct Message {
     pub sort_seq: i64,
     /// Server-assigned unique message identifier.
     pub server_id: i64,
+    /// SQLite rowid of the message row within its source shard.
+    ///
+    /// Stable local identity: messages without a usable server_id (`<= 0`)
+    /// are identified by `(source_shard, local_id)` instead.
+    pub local_id: i64,
+    /// Stable basename of the source shard, set only for messages with
+    /// `server_id <= 0` (no server-assigned identity). `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_shard: Option<String>,
     /// The primary message type (lower 32 bits of `local_type`).
     pub msg_type: u32,
     /// The message sub-type (upper 32 bits of `local_type`), used by app messages.

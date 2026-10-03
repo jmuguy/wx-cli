@@ -1,17 +1,19 @@
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use rayon::prelude::*;
 use rusqlite::Connection;
 
-use crate::cmd::export_media::{export_image_bytes, MediaAsset, MediaKind, MediaStats};
+use crate::cmd::export_media::{
+    export_image_bytes, MediaAsset, MediaKind, MediaState, MediaStats, MediaStatus,
+};
 use crate::schema::EnrichedMessage;
 use crate::util::{format_month, sanitize_filename};
 use wx_db::MessageContent;
-use wx_media::DatDecryptOptions;
+use wx_media::{DatDecryptOptions, MediaError};
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -118,6 +120,7 @@ pub struct ExportError {
     pub task_kind: &'static str,
     pub key: String,
     pub reason: String,
+    pub status: MediaStatus,
 }
 
 /// Aggregated error summary with grouped reporting.
@@ -128,18 +131,16 @@ pub struct ErrorSummary {
 
 impl ErrorSummary {
     pub fn print_report(&self) {
-        if self.errors.is_empty() {
-            return;
-        }
-        let mut groups: HashMap<&str, Vec<&ExportError>> = HashMap::new();
-        for e in &self.errors {
-            groups.entry(e.task_kind).or_default().push(e);
-        }
-        for (kind, errs) in groups {
-            eprintln!("media errors [{kind}]: {} failure(s)", errs.len());
-            for e in errs {
-                eprintln!("  - {}: {}", e.key, e.reason);
-            }
+        for error in &self.errors {
+            let label = if error.status.state == MediaState::Missing {
+                "media unavailable"
+            } else {
+                "error: media"
+            };
+            eprintln!(
+                "{label} [{}]: {}: {}",
+                error.task_kind, error.key, error.reason
+            );
         }
     }
 }
@@ -159,9 +160,21 @@ impl WriteGate {
         }
     }
 
-    /// Try to claim a filename. Returns `true` if this thread should write.
-    pub fn claim(&self, filename: &str) -> bool {
-        self.written.lock().unwrap().insert(filename.to_string())
+    /// Serialize writes and publish a filename only after its write succeeds.
+    pub fn write(
+        &self,
+        filename: &str,
+        write: impl FnOnce() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let mut written = self
+            .written
+            .lock()
+            .map_err(|_| std::io::Error::other("media write gate poisoned"))?;
+        if !written.contains(filename) {
+            write()?;
+            written.insert(filename.to_string());
+        }
+        Ok(())
     }
 }
 
@@ -171,42 +184,44 @@ impl WriteGate {
 
 /// Per-thread connection pool for voice media_*.db files.
 pub struct VoiceConnectionPool {
-    db_paths: Vec<PathBuf>,
+    media_dir: PathBuf,
     path_key: u64,
 }
 
 impl VoiceConnectionPool {
     pub fn new(media_dir: &Path) -> Self {
-        let db_paths = wx_media::find_media_dbs(media_dir).unwrap_or_default();
-        let path_key = Self::compute_path_key(&db_paths);
-        Self { db_paths, path_key }
-    }
-
-    fn compute_path_key(paths: &[PathBuf]) -> u64 {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        let mut sorted: Vec<&Path> = paths.iter().map(|p| p.as_path()).collect();
-        sorted.sort();
-        for p in &sorted {
-            p.hash(&mut hasher);
+        Self {
+            media_dir: media_dir.to_path_buf(),
+            path_key: path_key(media_dir),
         }
-        hasher.finish()
     }
 
-    fn open_all(&self) -> Vec<Connection> {
-        let mut conns = Vec::new();
-        for path in &self.db_paths {
-            if let Ok(conn) =
-                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-            {
-                conns.push(conn);
+    fn open_all(&self) -> Result<Vec<Connection>, MediaError> {
+        let mut paths = Vec::new();
+        for entry in read_dir_if_present(&self.media_dir)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if (name == "media.db" || name.starts_with("media_")) && name.ends_with(".db") {
+                paths.push(entry.path());
             }
         }
-        conns
+        paths.sort();
+        paths
+            .into_iter()
+            .map(|path| {
+                source_metadata(&path)?
+                    .ok_or_else(|| MediaError::NotFound(path.display().to_string()))?;
+                Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(MediaError::from)
+            })
+            .collect()
     }
 
-    pub fn with_connections<R>(&self, f: impl FnOnce(&[Connection]) -> R) -> R {
+    pub fn with_connections<R>(
+        &self,
+        f: impl FnOnce(&[Connection]) -> Result<R, MediaError>,
+    ) -> Result<R, MediaError> {
         thread_local! {
             static CONNS: RefCell<Option<(u64, Vec<Connection>)>> = const { RefCell::new(None) };
         }
@@ -217,7 +232,7 @@ impl VoiceConnectionPool {
                     return f(conns);
                 }
             }
-            let conns = self.open_all();
+            let conns = self.open_all()?;
             *borrow = Some((self.path_key, conns));
             f(borrow.as_ref().unwrap().1.as_slice())
         })
@@ -232,19 +247,14 @@ pub struct HardlinkConnectionPool {
 
 impl HardlinkConnectionPool {
     pub fn new(db_path: PathBuf) -> Self {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        db_path.hash(&mut hasher);
-        let path_key = hasher.finish();
+        let path_key = path_key(&db_path);
         Self { db_path, path_key }
     }
 
-    fn open(&self) -> Option<Connection> {
-        Connection::open_with_flags(&self.db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
-    }
-
-    pub fn with_connection<R>(&self, f: impl FnOnce(&Connection) -> R) -> Option<R> {
+    pub fn with_connection<R>(
+        &self,
+        f: impl FnOnce(&Connection) -> Result<R, MediaError>,
+    ) -> Result<R, MediaError> {
         thread_local! {
             static CONN: RefCell<Option<(u64, Connection)>> = const { RefCell::new(None) };
         }
@@ -252,12 +262,17 @@ impl HardlinkConnectionPool {
             let mut borrow = cell.borrow_mut();
             if let Some((key, conn)) = borrow.as_ref() {
                 if *key == self.path_key {
-                    return Some(f(conn));
+                    return f(conn);
                 }
             }
-            let conn = self.open()?;
+            source_metadata(&self.db_path)?
+                .ok_or_else(|| MediaError::NotFound(self.db_path.display().to_string()))?;
+            let conn = Connection::open_with_flags(
+                &self.db_path,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+            )?;
             *borrow = Some((self.path_key, conn));
-            Some(f(&borrow.as_ref().unwrap().1))
+            f(&borrow.as_ref().unwrap().1)
         })
     }
 }
@@ -268,16 +283,20 @@ impl HardlinkConnectionPool {
 
 pub struct SharedContext {
     pub attach_dir: PathBuf,
-    pub media_dir: PathBuf,
     pub file_dir: PathBuf,
     pub video_dir: PathBuf,
     pub output_media_dir: PathBuf,
     pub dat_opts: DatDecryptOptions,
-    pub talker: String,
     pub voice_chat_name_id_hint: Arc<Mutex<Option<i64>>>,
     pub voice_pool: VoiceConnectionPool,
     pub hardlink_pool: HardlinkConnectionPool,
     pub write_gate: WriteGate,
+    /// Lazy per-export snapshot of image candidates; the attach tree is
+    /// scanned once on the first image lookup, so exports without images
+    /// never touch the filesystem and every export starts from a fresh scan.
+    // Initialization needs this export's runtime account/talker path.
+    image_index: OnceLock<Result<ImageIndex, std::io::Error>>,
+    image_base: PathBuf,
 }
 
 // ---------------------------------------------------------------------------
@@ -321,13 +340,13 @@ pub fn build_shared_context(
         voice_pool: VoiceConnectionPool::new(&media_dir),
         hardlink_pool: HardlinkConnectionPool::new(hardlink_db),
         write_gate: WriteGate::new(),
+        image_index: OnceLock::new(),
+        image_base: talker_attach,
         attach_dir,
-        media_dir,
         file_dir,
         video_dir,
         output_media_dir,
         dat_opts,
-        talker: talker.to_string(),
     }
 }
 
@@ -344,19 +363,19 @@ pub fn classify(messages: &[EnrichedMessage]) -> Vec<MediaTask> {
     let mut tasks = Vec::new();
     for (idx, em) in messages.iter().enumerate() {
         match &em.message.content {
-            MessageContent::Image { md5: Some(md5) } => {
+            MessageContent::Image { md5: Some(md5) } if !md5.is_empty() => {
                 tasks.push(MediaTask::Image {
                     md5: md5.clone(),
                     msg_index: idx,
                 });
             }
-            MessageContent::Voice => {
+            MessageContent::Voice if em.message.server_id > 0 => {
                 tasks.push(MediaTask::Voice {
                     server_id: em.message.server_id,
                     msg_index: idx,
                 });
             }
-            MessageContent::Video { md5: Some(md5) } => {
+            MessageContent::Video { md5: Some(md5) } if !md5.is_empty() => {
                 tasks.push(MediaTask::Video {
                     md5: md5.clone(),
                     create_time: em.message.create_time,
@@ -367,7 +386,7 @@ pub fn classify(messages: &[EnrichedMessage]) -> Vec<MediaTask> {
                 md5: Some(md5),
                 title,
                 ..
-            } => {
+            } if !md5.is_empty() => {
                 tasks.push(MediaTask::File {
                     md5: md5.clone(),
                     create_time: em.message.create_time,
@@ -447,7 +466,7 @@ pub fn resolve_parallel(
     tasks: Vec<MediaTask>,
     ctx: Arc<SharedContext>,
     parallel: Option<usize>,
-) -> (Vec<ResolvedAsset>, ErrorSummary) {
+) -> Vec<ResolvedAsset> {
     let num_threads = parallel.unwrap_or_else(rayon_default_threads).max(1);
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(num_threads)
@@ -467,7 +486,6 @@ pub fn resolve_parallel(
         TaskKind::File,
     ];
     let mut all_results = Vec::new();
-    let mut all_errors = ErrorSummary::default();
 
     for kind in order {
         let batch = match batches.remove(&kind) {
@@ -503,24 +521,10 @@ pub fn resolve_parallel(
                 .collect()
         });
 
-        for r in results {
-            if let Some(e) = &r.error {
-                all_errors.errors.push(ExportError {
-                    task_kind: kind_label,
-                    key: e.key.clone(),
-                    reason: e.reason.clone(),
-                });
-            }
-            all_results.push(ResolvedAsset {
-                msg_index: r.msg_index,
-                asset: r.asset,
-                tags: r.tags,
-                error: None, // errors collected separately
-            });
-        }
+        all_results.extend(results);
     }
 
-    (all_results, all_errors)
+    all_results
 }
 
 /// Resolve a single task.
@@ -545,107 +549,292 @@ fn resolve_one(task: &MediaTask, ctx: &SharedContext) -> ResolvedAsset {
     }
 }
 
-fn resolve_image(md5: &str, msg_index: usize, ctx: &SharedContext) -> ResolvedAsset {
-    let lookup = match wx_media::resolve_image_by_md5(&ctx.talker, &ctx.attach_dir, md5) {
-        Ok(r) => r,
-        Err(e) => {
-            return ResolvedAsset {
-                msg_index,
-                asset: None,
-                tags: vec![],
-                error: Some(ExportError {
-                    task_kind: "image",
-                    key: md5.to_string(),
-                    reason: format!("resolve failed: {e}"),
-                }),
-            };
-        }
+fn path_key(path: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    path.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn source_metadata(path: &Path) -> Result<Option<std::fs::Metadata>, MediaError> {
+    match std::fs::metadata(path) {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_dir_if_present(
+    path: &Path,
+) -> Result<std::iter::Flatten<std::option::IntoIter<std::fs::ReadDir>>, MediaError> {
+    let entries = match std::fs::read_dir(path) {
+        Ok(entries) => Some(entries),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error.into()),
     };
+    Ok(entries.into_iter().flatten())
+}
 
-    let dat_path = match lookup.recommended {
-        Some(p) => p,
-        None => {
-            return ResolvedAsset {
-                msg_index,
-                asset: None,
-                tags: vec![],
-                error: Some(ExportError {
-                    task_kind: "image",
-                    key: md5.to_string(),
-                    reason: "no recommended .dat".to_string(),
-                }),
-            };
+fn source_is_file(path: &Path) -> Result<bool, MediaError> {
+    match source_metadata(path)? {
+        None => Ok(false),
+        Some(metadata) if metadata.is_file() => Ok(true),
+        Some(_) => Err(MediaError::InvalidFormat {
+            reason: format!("expected media file: {}", path.display()),
+        }),
+    }
+}
+
+fn lookup_status(error: &MediaError) -> MediaStatus {
+    match error {
+        MediaError::NotFound(_) | MediaError::LookupMiss(_) => {
+            MediaStatus::new(MediaState::Missing, Some("missing_local_media"))
         }
-    };
-
-    let is_thumbnail = dat_path
-        .file_name()
-        .map(|n| n.to_string_lossy().contains("_t."))
-        .unwrap_or(false);
-
-    let data = match std::fs::read(&dat_path) {
-        Ok(d) => d,
-        Err(e) => {
-            return ResolvedAsset {
-                msg_index,
-                asset: None,
-                tags: vec![],
-                error: Some(ExportError {
-                    task_kind: "image",
-                    key: md5.to_string(),
-                    reason: format!("read {}: {e}", dat_path.display()),
-                }),
-            };
+        MediaError::Io(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            MediaStatus::new(MediaState::Missing, Some("missing_local_media"))
         }
-    };
-
-    let decoded = match wx_media::decrypt_dat(&data, &ctx.dat_opts) {
-        Ok(d) => d,
-        Err(e) => {
-            return ResolvedAsset {
-                msg_index,
-                asset: None,
-                tags: vec![],
-                error: Some(ExportError {
-                    task_kind: "image",
-                    key: md5.to_string(),
-                    reason: format!("decrypt: {e}"),
-                }),
-            };
+        MediaError::Sqlite(_) | MediaError::SchemaMissing(_) => {
+            MediaStatus::new(MediaState::Error, Some("media_database_error"))
         }
-    };
+        MediaError::Io(_) => MediaStatus::new(MediaState::Error, Some("media_read_error")),
+        _ => MediaStatus::new(MediaState::Error, Some("media_lookup_error")),
+    }
+}
 
-    let (image_data, image_ext, wxgf_transcoded, wxgf_fallback) =
-        export_image_bytes(decoded.data, &decoded.ext);
+fn failed(
+    msg_index: usize,
+    task_kind: &'static str,
+    key: &str,
+    status: MediaStatus,
+    reason: impl ToString,
+) -> ResolvedAsset {
+    ResolvedAsset {
+        msg_index,
+        asset: None,
+        tags: vec![],
+        error: Some(ExportError {
+            task_kind,
+            key: key.to_string(),
+            reason: reason.to_string(),
+            status,
+        }),
+    }
+}
 
-    let filename = format!("{md5}.{image_ext}");
-    if ctx.write_gate.claim(&filename) {
-        let out_path = ctx.output_media_dir.join(&filename);
-        if let Err(e) = std::fs::write(&out_path, &image_data) {
-            return ResolvedAsset {
-                msg_index,
-                asset: None,
-                tags: vec![],
-                error: Some(ExportError {
-                    task_kind: "image",
-                    key: md5.to_string(),
-                    reason: format!("write {}: {e}", out_path.display()),
-                }),
-            };
+fn lookup_failed(
+    msg_index: usize,
+    task_kind: &'static str,
+    key: &str,
+    error: MediaError,
+) -> ResolvedAsset {
+    failed(msg_index, task_kind, key, lookup_status(&error), error)
+}
+
+fn hard_failed(
+    msg_index: usize,
+    task_kind: &'static str,
+    key: &str,
+    code: &'static str,
+    error: impl ToString,
+) -> ResolvedAsset {
+    failed(
+        msg_index,
+        task_kind,
+        key,
+        MediaStatus::new(MediaState::Error, Some(code)),
+        error,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Image index — one lazy snapshot of the attach tree per export
+// ---------------------------------------------------------------------------
+
+/// Snapshot of every `.dat` image candidate under the talker's attach tree.
+///
+/// Built once per export (lazily, on the first image lookup) so per-message
+/// lookups borrow from one enumeration instead of rescanning the same month
+/// directories for every md5. Living on [`SharedContext`] guarantees a fresh
+/// snapshot per export, keeping newly downloaded media visible on overlap.
+struct ImageIndex {
+    /// File name → candidate paths across all month directories.
+    files: BTreeMap<String, Vec<PathBuf>>,
+}
+
+impl ImageIndex {
+    fn build(base: &Path) -> std::io::Result<Self> {
+        let mut files: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
+        if let Some(months) = read_dir_complete(base)? {
+            for month in months {
+                if !entry_is_dir(&month)? {
+                    continue;
+                }
+                if let Some(images) = read_dir_complete(&month.path().join("Img"))? {
+                    for file in images {
+                        let name = file.file_name();
+                        let name = name.to_string_lossy();
+                        if name.ends_with(".dat") {
+                            files
+                                .entry(name.into_owned())
+                                .or_default()
+                                .push(file.path());
+                        }
+                    }
+                }
+            }
         }
+        Ok(Self { files })
     }
 
+    /// Same selection the per-md5 scan produced: prefer `{md5}_h.dat`, then
+    /// `{md5}.dat`, then the lexicographically first remaining candidate.
+    fn find(&self, md5: &str) -> Option<&Path> {
+        let mut best: Option<(u8, &Path)> = None;
+        for (name, paths) in self
+            .files
+            .range::<str, _>((std::ops::Bound::Included(md5), std::ops::Bound::Unbounded))
+        {
+            if !name.starts_with(md5) {
+                break;
+            }
+            let rank = match &name[md5.len()..] {
+                "_h.dat" => 0,
+                ".dat" => 1,
+                _ => 2,
+            };
+            for path in paths {
+                let candidate = (rank, path.as_path());
+                if best.is_none_or(|current| candidate < current) {
+                    best = Some(candidate);
+                }
+            }
+        }
+        best.map(|(_, path)| path)
+    }
+}
+
+/// Collect one complete directory enumeration, restarting after interruptions.
+///
+/// A `ReadDir` iterator can become exhausted after an error, so merely
+/// skipping an `Interrupted` result would silently drop the entries that were
+/// not reached yet; the enumeration restarts from a fresh open instead.
+/// Absent directories enumerate as empty; every other error is a hard error.
+fn enumerate_complete<T, I>(
+    mut open: impl FnMut() -> std::io::Result<Option<I>>,
+) -> std::io::Result<Option<Vec<T>>>
+where
+    I: Iterator<Item = std::io::Result<T>>,
+{
+    loop {
+        let entries = match open() {
+            Ok(Some(entries)) => entries,
+            Ok(None) => return Ok(None),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        };
+        let mut collected = Vec::new();
+        let mut interrupted = false;
+        for entry in entries {
+            match entry {
+                Ok(entry) => collected.push(entry),
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {
+                    interrupted = true;
+                    break;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        if !interrupted {
+            return Ok(Some(collected));
+        }
+    }
+}
+
+fn read_dir_complete(dir: &Path) -> std::io::Result<Option<Vec<std::fs::DirEntry>>> {
+    enumerate_complete(|| match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    })
+}
+
+fn entry_is_dir(entry: &std::fs::DirEntry) -> std::io::Result<bool> {
+    loop {
+        match entry.file_type() {
+            Ok(file_type) => return Ok(file_type.is_dir()),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+#[derive(Debug)]
+enum ImageLookupError<'a> {
+    Missing,
+    Index(&'a std::io::Error),
+}
+
+/// Strict scans preserve selection conventions without lossy filesystem errors.
+///
+/// The first lookup of an export builds the snapshot; later lookups borrow
+/// from it without touching the filesystem again.
+fn find_image<'a>(ctx: &'a SharedContext, md5: &str) -> Result<&'a Path, ImageLookupError<'a>> {
+    match ctx
+        .image_index
+        .get_or_init(|| ImageIndex::build(&ctx.image_base))
+    {
+        Ok(index) => index.find(md5).ok_or(ImageLookupError::Missing),
+        Err(error) => Err(ImageLookupError::Index(error)),
+    }
+}
+
+fn resolve_image(md5: &str, msg_index: usize, ctx: &SharedContext) -> ResolvedAsset {
+    let path = match find_image(ctx, md5) {
+        Ok(path) => path,
+        Err(ImageLookupError::Missing) => {
+            return failed(
+                msg_index,
+                "image",
+                md5,
+                MediaStatus::new(MediaState::Missing, Some("missing_local_media")),
+                "local image not found",
+            );
+        }
+        Err(ImageLookupError::Index(error)) => {
+            return hard_failed(msg_index, "image", md5, "media_read_error", error);
+        }
+    };
+    let data = match std::fs::read(path) {
+        Ok(data) => data,
+        Err(error) => return lookup_failed(msg_index, "image", md5, error.into()),
+    };
+    let decoded = match wx_media::decrypt_dat(&data, &ctx.dat_opts) {
+        Ok(decoded) => decoded,
+        Err(error) => return hard_failed(msg_index, "image", md5, "media_decode_error", error),
+    };
+    let (data, ext, transcoded, fallback) = match export_image_bytes(decoded.data, &decoded.ext) {
+        Ok(result) => result,
+        Err(error) => return hard_failed(msg_index, "image", md5, "media_decode_error", error),
+    };
+    let filename = format!("{md5}.{ext}");
+    if let Err(error) = ctx.write_gate.write(&filename, || {
+        std::fs::write(ctx.output_media_dir.join(&filename), &data)
+    }) {
+        return hard_failed(msg_index, "image", md5, "media_write_error", error);
+    }
     let mut tags = vec![];
-    if is_thumbnail {
+    if path
+        .file_name()
+        .is_some_and(|name| name.to_string_lossy().contains("_t."))
+    {
         tags.push(TaskTag::ThumbnailImage);
     }
-    if wxgf_transcoded {
+    if transcoded {
         tags.push(TaskTag::WxgfTranscoded);
     }
-    if wxgf_fallback {
+    if fallback {
         tags.push(TaskTag::WxgfFallback);
     }
-
     ResolvedAsset {
         msg_index,
         asset: Some(MediaAsset {
@@ -658,89 +847,171 @@ fn resolve_image(md5: &str, msg_index: usize, ctx: &SharedContext) -> ResolvedAs
 }
 
 fn resolve_voice(server_id: i64, msg_index: usize, ctx: &SharedContext) -> ResolvedAsset {
-    let svr_id = server_id.to_string();
-    let chat_name_id_hint = ctx
-        .voice_chat_name_id_hint
-        .lock()
-        .ok()
-        .and_then(|hint| *hint);
-
+    let key = server_id.to_string();
+    let hint = match ctx.voice_chat_name_id_hint.lock() {
+        Ok(hint) => *hint,
+        Err(error) => return hard_failed(msg_index, "voice", &key, "media_context_error", error),
+    };
     let blob = ctx.voice_pool.with_connections(|conns| {
+        let mut found = None;
+        // A good shard cannot mask a corrupt/schema-invalid shard.
         for conn in conns {
-            if let Ok(b) = wx_media::extract_voice_with_conn_hint(conn, &svr_id, chat_name_id_hint)
-            {
-                return Some(b);
-            }
-        }
-        None
-    });
-
-    let blob = match blob {
-        Some(b) => b,
-        None => {
-            // Fallback to opening fresh connections
-            match wx_media::extract_voice(&ctx.media_dir, &svr_id) {
-                Ok(b) => b,
-                Err(e) => {
-                    return ResolvedAsset {
-                        msg_index,
-                        asset: None,
-                        tags: vec![],
-                        error: Some(ExportError {
-                            task_kind: "voice",
-                            key: svr_id,
-                            reason: format!("extract failed: {e}"),
-                        }),
-                    };
+            match wx_media::extract_voice_with_conn_hint(conn, &key, hint) {
+                Ok(blob) => {
+                    if found.is_none() {
+                        found = Some(blob);
+                    }
                 }
+                Err(MediaError::LookupMiss(_) | MediaError::NotFound(_)) => {}
+                Err(error) => return Err(error),
             }
         }
+        found.ok_or_else(|| MediaError::LookupMiss(format!("voice {key}")))
+    });
+    let blob = match blob {
+        Ok(blob) => blob,
+        Err(error) => return lookup_failed(msg_index, "voice", &key, error),
     };
-
     update_voice_chat_name_id_hint(ctx, &blob);
-
-    let (data, ext, is_silk) = match wx_media::transcode_silk_to_mp3(&blob.data) {
-        Ok(result) => {
-            let is_silk = !result.transcoded;
-            (result.data, result.ext.to_string(), is_silk)
-        }
-        Err(e) => {
-            eprintln!("warning: voice transcode failed for svr_id={svr_id}: {e}");
-            (blob.data, "silk".to_string(), true)
-        }
+    let audio = match wx_media::transcode_silk_to_mp3(&blob.data) {
+        Ok(audio) => audio,
+        Err(error) => return hard_failed(msg_index, "voice", &key, "media_decode_error", error),
     };
-
-    let filename = format!("{svr_id}.{ext}");
-    if ctx.write_gate.claim(&filename) {
-        let out_path = ctx.output_media_dir.join(&filename);
-        if let Err(e) = std::fs::write(&out_path, &data) {
-            return ResolvedAsset {
-                msg_index,
-                asset: None,
-                tags: vec![],
-                error: Some(ExportError {
-                    task_kind: "voice",
-                    key: svr_id,
-                    reason: format!("write {}: {e}", out_path.display()),
-                }),
-            };
-        }
+    let filename = format!("{key}.{}", audio.ext);
+    if let Err(error) = ctx.write_gate.write(&filename, || {
+        std::fs::write(ctx.output_media_dir.join(&filename), &audio.data)
+    }) {
+        return hard_failed(msg_index, "voice", &key, "media_write_error", error);
     }
-
-    let mut tags = vec![];
-    if is_silk {
-        tags.push(TaskTag::SilkVoice);
-    }
-
     ResolvedAsset {
         msg_index,
         asset: Some(MediaAsset {
             kind: MediaKind::Voice,
             filename,
         }),
+        tags: if audio.transcoded {
+            vec![]
+        } else {
+            vec![TaskTag::SilkVoice]
+        },
+        error: None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn copy_source(
+    source: &Path,
+    filename: String,
+    kind: MediaKind,
+    label: &'static str,
+    md5: &str,
+    msg_index: usize,
+    ctx: &SharedContext,
+    tags: Vec<TaskTag>,
+) -> ResolvedAsset {
+    let mut input = match std::fs::File::open(source) {
+        Ok(input) => input,
+        Err(error) => return lookup_failed(msg_index, label, md5, error.into()),
+    };
+    if let Err(error) = ctx.write_gate.write(&filename, || {
+        let mut output = std::fs::File::create(ctx.output_media_dir.join(&filename))?;
+        std::io::copy(&mut input, &mut output)?;
+        Ok(())
+    }) {
+        return hard_failed(msg_index, label, md5, "media_write_error", error);
+    }
+    ResolvedAsset {
+        msg_index,
+        asset: Some(MediaAsset { kind, filename }),
         tags,
         error: None,
     }
+}
+
+fn find_video(dir: &Path, md5: &str, month: &str) -> Result<Option<PathBuf>, MediaError> {
+    let target = format!("{md5}.mp4");
+    let hint = dir.join(month).join(&target);
+    if source_is_file(&hint)? {
+        return Ok(Some(hint));
+    }
+    for entry in read_dir_if_present(dir)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let bytes = name.as_bytes();
+        if bytes.len() != 7
+            || bytes[4] != b'-'
+            || !bytes[..4].iter().all(u8::is_ascii_digit)
+            || !bytes[5..].iter().all(u8::is_ascii_digit)
+            || !(1..=12).contains(&((bytes[5] - b'0') * 10 + bytes[6] - b'0'))
+            || name == month
+        {
+            continue;
+        }
+        let path = entry.path().join(&target);
+        if source_is_file(&path)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+struct HardlinkSource {
+    file_name: String,
+    dir1: String,
+    dir2: String,
+}
+
+/// The library drops failed row decodes; export must retain those database errors.
+fn query_hardlink(
+    conn: &Connection,
+    kind: &'static str,
+    key: &str,
+) -> Result<Vec<HardlinkSource>, MediaError> {
+    let tables = match kind {
+        "video" => ["video_hardlink_info_v3", "video_hardlink_info_v4"],
+        "file" => ["file_hardlink_info_v3", "file_hardlink_info_v4"],
+        _ => {
+            return Err(MediaError::InvalidFormat {
+                reason: "unsupported hardlink type".into(),
+            })
+        }
+    };
+    let mut selected = None;
+    for table in tables {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )?;
+        if exists {
+            selected = Some(table);
+            break;
+        }
+    }
+    let table =
+        selected.ok_or_else(|| MediaError::SchemaMissing(format!("{kind} hardlink table")))?;
+    let sql = format!(
+        "SELECT f.file_name, IFNULL(d1.username, ''), IFNULL(d2.username, '')
+         FROM {table} f
+         LEFT JOIN dir2id d1 ON d1.rowid = f.dir1
+         LEFT JOIN dir2id d2 ON d2.rowid = f.dir2
+         WHERE f.md5 = ?1 OR f.file_name LIKE ?2 || '%'"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let entries = stmt
+        .query_map(rusqlite::params![key, key], |row| {
+            Ok(HardlinkSource {
+                file_name: row.get(0)?,
+                dir1: row.get(1)?,
+                dir2: row.get(2)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    if entries.is_empty() {
+        return Err(MediaError::LookupMiss(format!("{kind} {key}")));
+    }
+    Ok(entries)
 }
 
 fn resolve_video(
@@ -749,106 +1020,67 @@ fn resolve_video(
     msg_index: usize,
     ctx: &SharedContext,
 ) -> ResolvedAsset {
-    // Try hardlink DB first
-    let hardlink_result = ctx
+    let entries = match ctx
         .hardlink_pool
-        .with_connection(|conn| wx_media::query_hardlink_with_conn(conn, "video", md5));
-
-    let entries = match hardlink_result {
-        Some(Ok(e)) => Some(e),
-        Some(Err(e)) => {
-            if !matches!(&e, wx_media::MediaError::NotFound(_)) {
-                eprintln!("warning: video hardlink query failed for md5={md5}: {e}");
-            }
-            None
-        }
-        None => None,
+        .with_connection(|conn| query_hardlink(conn, "video", md5))
+    {
+        Ok(entries) => entries,
+        Err(MediaError::LookupMiss(_) | MediaError::NotFound(_)) => vec![],
+        Err(error) => return lookup_failed(msg_index, "video", md5, error),
     };
-
-    if let Some(entries) = entries {
-        if let Some(entry) = entries.first() {
-            let candidates = [
-                ctx.attach_dir
-                    .join(&entry.dir1)
-                    .join(&entry.dir2)
-                    .join("Video")
-                    .join(&entry.file_name),
-                ctx.attach_dir
-                    .join(&entry.dir1)
-                    .join(&entry.dir2)
-                    .join(&entry.file_name),
-                ctx.attach_dir
-                    .join(&entry.dir1)
-                    .join("Video")
-                    .join(&entry.file_name),
-            ];
-
-            if let Some(source) = candidates.iter().find(|p| p.exists()) {
-                let filename = entry.file_name.clone();
-                if ctx.write_gate.claim(&filename) {
-                    let out_path = ctx.output_media_dir.join(&filename);
-                    if let Err(e) = std::fs::copy(source, &out_path) {
-                        return ResolvedAsset {
-                            msg_index,
-                            asset: None,
-                            tags: vec![],
-                            error: Some(ExportError {
-                                task_kind: "video",
-                                key: md5.to_string(),
-                                reason: format!("copy {}: {e}", source.display()),
-                            }),
-                        };
-                    }
+    if let Some(entry) = entries.first() {
+        let candidates = [
+            ctx.attach_dir
+                .join(&entry.dir1)
+                .join(&entry.dir2)
+                .join("Video")
+                .join(&entry.file_name),
+            ctx.attach_dir
+                .join(&entry.dir1)
+                .join(&entry.dir2)
+                .join(&entry.file_name),
+            ctx.attach_dir
+                .join(&entry.dir1)
+                .join("Video")
+                .join(&entry.file_name),
+        ];
+        for source in candidates {
+            match source_is_file(&source) {
+                Ok(true) => {
+                    return copy_source(
+                        &source,
+                        entry.file_name.clone(),
+                        MediaKind::Video,
+                        "video",
+                        md5,
+                        msg_index,
+                        ctx,
+                        vec![],
+                    )
                 }
-                return ResolvedAsset {
-                    msg_index,
-                    asset: Some(MediaAsset {
-                        kind: MediaKind::Video,
-                        filename,
-                    }),
-                    tags: vec![],
-                    error: None,
-                };
+                Ok(false) => {}
+                Err(error) => return lookup_failed(msg_index, "video", md5, error),
             }
         }
     }
-
-    // Fallback: directory scan
-    let month = format_month(create_time);
-    match wx_media::find_video_by_md5(&ctx.video_dir, md5, &month) {
-        Some(source) => {
-            let filename = format!("{md5}.mp4");
-            if ctx.write_gate.claim(&filename) {
-                let out_path = ctx.output_media_dir.join(&filename);
-                if let Err(e) = std::fs::copy(&source, &out_path) {
-                    return ResolvedAsset {
-                        msg_index,
-                        asset: None,
-                        tags: vec![],
-                        error: Some(ExportError {
-                            task_kind: "video",
-                            key: md5.to_string(),
-                            reason: format!("copy fallback {}: {e}", source.display()),
-                        }),
-                    };
-                }
-            }
-            ResolvedAsset {
-                msg_index,
-                asset: Some(MediaAsset {
-                    kind: MediaKind::Video,
-                    filename,
-                }),
-                tags: vec![TaskTag::FallbackVideo],
-                error: None,
-            }
-        }
-        None => ResolvedAsset {
+    match find_video(&ctx.video_dir, md5, &format_month(create_time)) {
+        Ok(Some(source)) => copy_source(
+            &source,
+            format!("{md5}.mp4"),
+            MediaKind::Video,
+            "video",
+            md5,
             msg_index,
-            asset: None,
-            tags: vec![TaskTag::SkippedVideo],
-            error: None,
-        },
+            ctx,
+            vec![TaskTag::FallbackVideo],
+        ),
+        Ok(None) => {
+            let mut result =
+                lookup_failed(msg_index, "video", md5, MediaError::NotFound(md5.into()));
+            result.tags.push(TaskTag::SkippedVideo);
+            result
+        }
+        Err(error) => lookup_failed(msg_index, "video", md5, error),
     }
 }
 
@@ -859,105 +1091,89 @@ fn resolve_file(
     msg_index: usize,
     ctx: &SharedContext,
 ) -> ResolvedAsset {
-    // Try hardlink DB first
-    let hardlink_result = ctx
+    let entries = match ctx
         .hardlink_pool
-        .with_connection(|conn| wx_media::query_hardlink_with_conn(conn, "file", md5));
-
-    let entries = match hardlink_result {
-        Some(Ok(e)) => Some(e),
-        Some(Err(e)) => {
-            if !matches!(&e, wx_media::MediaError::NotFound(_)) {
-                eprintln!("warning: file hardlink query failed for md5={md5}: {e}");
-            }
-            None
-        }
-        None => None,
+        .with_connection(|conn| query_hardlink(conn, "file", md5))
+    {
+        Ok(entries) => entries,
+        Err(MediaError::LookupMiss(_) | MediaError::NotFound(_)) => vec![],
+        Err(error) => return lookup_failed(msg_index, "file", md5, error),
     };
-
-    if let Some(entries) = entries {
-        if let Some(entry) = entries.first() {
-            let candidates = [
-                ctx.file_dir
-                    .join(&entry.dir1)
-                    .join(&entry.dir2)
-                    .join(&entry.file_name),
-                ctx.file_dir.join(&entry.dir1).join(&entry.file_name),
-            ];
-
-            if let Some(source) = candidates.iter().find(|p| p.exists()) {
-                let filename = format!("{}_{}", md5, entry.file_name);
-                if ctx.write_gate.claim(&filename) {
-                    let out_path = ctx.output_media_dir.join(&filename);
-                    if let Err(e) = std::fs::copy(source, &out_path) {
-                        return ResolvedAsset {
-                            msg_index,
-                            asset: None,
-                            tags: vec![],
-                            error: Some(ExportError {
-                                task_kind: "file",
-                                key: md5.to_string(),
-                                reason: format!("copy {}: {e}", source.display()),
-                            }),
-                        };
-                    }
-                }
-                return ResolvedAsset {
-                    msg_index,
-                    asset: Some(MediaAsset {
-                        kind: MediaKind::File,
-                        filename,
-                    }),
-                    tags: vec![],
-                    error: None,
-                };
-            }
-        }
-    }
-
-    // Fallback: directory scan by title
-    if let Some(t) = title {
-        let month = format_month(create_time);
-        if let Some(source) = wx_media::find_file_by_name(&ctx.file_dir, t, &month) {
-            let basename = std::path::Path::new(t)
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_else(|| t.to_string());
-            let safe_name = sanitize_filename(&basename);
-            let filename = format!("{md5}_{safe_name}");
-            if ctx.write_gate.claim(&filename) {
-                let out_path = ctx.output_media_dir.join(&filename);
-                if let Err(e) = std::fs::copy(&source, &out_path) {
-                    return ResolvedAsset {
+    if let Some(entry) = entries.first() {
+        let candidates = [
+            ctx.file_dir
+                .join(&entry.dir1)
+                .join(&entry.dir2)
+                .join(&entry.file_name),
+            ctx.file_dir.join(&entry.dir1).join(&entry.file_name),
+        ];
+        for source in candidates {
+            match source_is_file(&source) {
+                Ok(true) => {
+                    return copy_source(
+                        &source,
+                        format!("{md5}_{}", entry.file_name),
+                        MediaKind::File,
+                        "file",
+                        md5,
                         msg_index,
-                        asset: None,
-                        tags: vec![],
-                        error: Some(ExportError {
-                            task_kind: "file",
-                            key: md5.to_string(),
-                            reason: format!("copy fallback {}: {e}", source.display()),
-                        }),
-                    };
+                        ctx,
+                        vec![],
+                    )
                 }
+                Ok(false) => {}
+                Err(error) => return lookup_failed(msg_index, "file", md5, error),
             }
-            return ResolvedAsset {
-                msg_index,
-                asset: Some(MediaAsset {
-                    kind: MediaKind::File,
-                    filename,
-                }),
-                tags: vec![TaskTag::FallbackFile],
-                error: None,
-            };
         }
     }
-
-    ResolvedAsset {
-        msg_index,
-        asset: None,
-        tags: vec![TaskTag::SkippedFile],
-        error: None,
+    if let Some(basename) = title.and_then(|title| Path::new(title).file_name()) {
+        let source = ctx.file_dir.join(format_month(create_time)).join(basename);
+        match source_is_file(&source) {
+            Ok(true) => {
+                let filename = format!("{md5}_{}", sanitize_filename(&basename.to_string_lossy()));
+                return copy_source(
+                    &source,
+                    filename,
+                    MediaKind::File,
+                    "file",
+                    md5,
+                    msg_index,
+                    ctx,
+                    vec![TaskTag::FallbackFile],
+                );
+            }
+            Ok(false) => {}
+            Err(error) => return lookup_failed(msg_index, "file", md5, error),
+        }
     }
+    let mut result = lookup_failed(msg_index, "file", md5, MediaError::NotFound(md5.into()));
+    result.tags.push(TaskTag::SkippedFile);
+    result
+}
+
+/// Cover eligible messages even when no task can be classified or cache is absent.
+pub fn initial_statuses(messages: &[EnrichedMessage], no_media: bool) -> Vec<Option<MediaStatus>> {
+    messages
+        .iter()
+        .map(|message| initial_status(message, no_media))
+        .collect()
+}
+
+pub fn initial_status(message: &EnrichedMessage, no_media: bool) -> Option<MediaStatus> {
+    let has_reference = match &message.message.content {
+        MessageContent::Image { md5 }
+        | MessageContent::Video { md5 }
+        | MessageContent::File { md5, .. } => md5.as_ref().is_some_and(|md5| !md5.is_empty()),
+        MessageContent::Voice => message.message.server_id > 0,
+        _ => return None,
+    };
+    Some(if no_media {
+        MediaStatus::new(MediaState::MetadataOnly, None)
+    } else if !has_reference {
+        MediaStatus::new(MediaState::Missing, Some("missing_reference"))
+    } else {
+        MediaStatus::new(MediaState::Error, Some("media_cache_unavailable"))
+    })
 }
 
 /// Stage 5: Collect resolved assets back into a media_map indexed by message position.
@@ -967,52 +1183,52 @@ pub fn collect(
     results: Vec<ResolvedAsset>,
     dup_map: &DupMap,
     total_messages: usize,
-) -> (Vec<Vec<MediaAsset>>, MediaStats, ErrorSummary) {
+) -> (
+    Vec<Vec<MediaAsset>>,
+    MediaStats,
+    ErrorSummary,
+    Vec<Option<MediaStatus>>,
+) {
     let mut media_map: Vec<Vec<MediaAsset>> = vec![vec![]; total_messages];
+    let mut statuses = vec![None; total_messages];
     let mut stats = MediaStats::default();
     let mut errors = ErrorSummary::default();
-
-    // Build index from results by msg_index
-    let mut by_index: HashMap<usize, (Option<MediaAsset>, Vec<TaskTag>)> = HashMap::new();
-    for r in results {
-        if let Some(e) = r.error {
-            errors.errors.push(e);
-        }
-        by_index.insert(r.msg_index, (r.asset, r.tags));
+    let mut by_index = HashMap::new();
+    for mut result in results {
+        let status = if let Some(error) = result.error.take() {
+            let status = error.status;
+            // Even a produced fallback must not expose an asset after hard failure.
+            result.asset = None;
+            errors.errors.push(error);
+            status
+        } else if result.asset.is_some() {
+            MediaStatus::new(MediaState::Available, None)
+        } else {
+            MediaStatus::new(MediaState::Missing, Some("missing_local_media"))
+        };
+        statuses[result.msg_index] = Some(status);
+        apply_tags(&mut stats, &result.tags);
+        by_index.insert(result.msg_index, result);
     }
-
-    // Place canonical results — count tags always, copy asset only when present.
-    // Matches old MediaBridge: SkippedVideo/SkippedFile stats counted unconditionally;
-    // image stats (ThumbnailImage, WxgfTranscoded, WxgfFallback) also counted
-    // because canonical always does the full resolve.
-    for (msg_idx, (asset, tags)) in &by_index {
-        apply_tags(&mut stats, tags);
-        if let Some(a) = asset {
-            media_map[*msg_idx].push(a.clone());
-        }
-    }
-
-    // Resolve duplicates — copy the canonical task's asset to duplicate msg positions.
-    // Step 1: Count tags that should be counted per-message (SilkVoice, FallbackVideo,
-    // FallbackFile, SkippedVideo, SkippedFile) — always, even when asset is None.
-    // Step 2: Copy the asset to duplicate msg positions (only when asset exists).
-    // This two-step approach matches old MediaBridge behavior where skipped/fallback
-    // stats were counted regardless of dedup, but image stats only counted once.
-    for (dup_msg_idx, canonical_msg_idx) in &dup_map.duplicates {
-        if let Some((asset, tags)) = by_index.get(canonical_msg_idx) {
-            let dup_tags: Vec<TaskTag> = tags
-                .iter()
-                .copied()
-                .filter(|t| t.counts_on_duplicate())
-                .collect();
-            apply_tags(&mut stats, &dup_tags);
-            if let Some(a) = asset {
-                media_map[*dup_msg_idx].push(a.clone());
+    for &(duplicate, canonical) in &dup_map.duplicates {
+        if let Some(result) = by_index.get(&canonical) {
+            statuses[duplicate] = statuses[canonical];
+            for tag in &result.tags {
+                if tag.counts_on_duplicate() {
+                    apply_tags(&mut stats, std::slice::from_ref(tag));
+                }
+            }
+            if let Some(asset) = &result.asset {
+                media_map[duplicate].push(asset.clone());
             }
         }
     }
-
-    (media_map, stats, errors)
+    for (index, result) in by_index {
+        if let Some(asset) = result.asset {
+            media_map[index].push(asset);
+        }
+    }
+    (media_map, stats, errors, statuses)
 }
 
 fn apply_tags(stats: &mut MediaStats, tags: &[TaskTag]) {
@@ -1034,6 +1250,376 @@ fn apply_tags(stats: &mut MediaStats, tags: &[TaskTag]) {
 mod tests {
     use super::*;
     use std::sync::Arc;
+
+    #[test]
+    fn hardlink_row_decode_error_is_not_lookup_miss_with_available_fallback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctx = media_context(tmp.path());
+        Connection::open(tmp.path().join("hardlink.db")).unwrap().execute_batch(
+            "CREATE TABLE dir2id(username TEXT);
+             CREATE TABLE file_hardlink_info_v3(md5 TEXT, file_name TEXT, dir1 INTEGER, dir2 INTEGER);
+             INSERT INTO file_hardlink_info_v3 VALUES ('abc', X'ff', 0, 0);",
+        ).unwrap();
+        let month = format_month(0);
+        std::fs::create_dir_all(ctx.file_dir.join(&month)).unwrap();
+        std::fs::write(
+            ctx.file_dir.join(month).join("report.pdf"),
+            b"available file",
+        )
+        .unwrap();
+        let result = resolve_file("abc", 0, Some("report.pdf"), 0, &ctx);
+        assert!(result.asset.is_none());
+        assert_eq!(
+            result.error.unwrap().status,
+            MediaStatus::new(MediaState::Error, Some("media_database_error"))
+        );
+    }
+
+    #[test]
+    fn corrupt_voice_shard_remains_hard_even_after_another_shard_returns_blob() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctx = media_context(tmp.path());
+        std::fs::create_dir_all(tmp.path().join("media")).unwrap();
+        create_voice_media_db(
+            &tmp.path().join("media/media_0.db"),
+            &[(1, 0, 1, 12, b"available blob")],
+        );
+        Connection::open(tmp.path().join("media/media_1.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (value TEXT);")
+            .unwrap();
+        let result = resolve_voice(12, 0, &ctx);
+        assert!(result.asset.is_none());
+        assert_eq!(
+            result.error.unwrap().status,
+            MediaStatus::new(MediaState::Error, Some("media_database_error"))
+        );
+    }
+
+    fn media_context(root: &Path) -> SharedContext {
+        build_shared_context(
+            root.join("attach"),
+            root.join("media"),
+            root.join("file"),
+            root.join("video"),
+            root.join("hardlink.db"),
+            root.join("output"),
+            "wxid_test",
+            DatDecryptOptions {
+                v2_aes_key: None,
+                xor_key: Some(0xa5),
+            },
+        )
+    }
+
+    #[test]
+    fn proven_absence_survives_parallel_resolve_and_duplicate_fanout() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let tasks = vec![
+            MediaTask::Image {
+                md5: "absent".into(),
+                msg_index: 0,
+            },
+            MediaTask::Image {
+                md5: "absent".into(),
+                msg_index: 1,
+            },
+            MediaTask::Voice {
+                server_id: 12,
+                msg_index: 2,
+            },
+            MediaTask::Video {
+                md5: "absent".into(),
+                create_time: 0,
+                msg_index: 3,
+            },
+            MediaTask::Video {
+                md5: "absent".into(),
+                create_time: 0,
+                msg_index: 4,
+            },
+            MediaTask::File {
+                md5: "absent".into(),
+                title: None,
+                create_time: 0,
+                msg_index: 5,
+            },
+        ];
+        let (tasks, duplicates) = dedup(tasks);
+        let results = resolve_parallel(tasks, Arc::new(media_context(tmp.path())), Some(2));
+        let (media, stats, diagnostics, statuses) = collect(results, &duplicates, 6);
+        assert!(media.iter().all(Vec::is_empty));
+        assert_eq!(
+            statuses,
+            vec![
+                Some(MediaStatus::new(
+                    MediaState::Missing,
+                    Some("missing_local_media"),
+                ));
+                6
+            ]
+        );
+        assert!(diagnostics
+            .errors
+            .iter()
+            .all(|error| error.status.state == MediaState::Missing));
+        assert_eq!(stats.skipped_videos, 2);
+        assert_eq!(stats.skipped_files, 1);
+        let summary = crate::cmd::export_media::MediaSummary::from_statuses(&statuses, false);
+        assert_eq!(
+            (
+                summary.expected,
+                summary.missing,
+                summary.errors,
+                summary.not_attempted
+            ),
+            (6, 6, 0, 0)
+        );
+    }
+
+    #[test]
+    fn hardlink_schema_error_cannot_be_masked_by_file_or_video_fallback() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctx = media_context(tmp.path());
+        Connection::open(tmp.path().join("hardlink.db"))
+            .unwrap()
+            .execute_batch("CREATE TABLE unrelated (value TEXT);")
+            .unwrap();
+        let month = format_month(0);
+        std::fs::create_dir_all(ctx.video_dir.join(&month)).unwrap();
+        std::fs::create_dir_all(ctx.file_dir.join(&month)).unwrap();
+        std::fs::create_dir_all(&ctx.output_media_dir).unwrap();
+        std::fs::write(ctx.video_dir.join(&month).join("abc.mp4"), b"real video").unwrap();
+        std::fs::write(ctx.file_dir.join(&month).join("report.pdf"), b"real file").unwrap();
+        let results = resolve_parallel(
+            vec![
+                MediaTask::Video {
+                    md5: "abc".into(),
+                    create_time: 0,
+                    msg_index: 0,
+                },
+                MediaTask::File {
+                    md5: "abc".into(),
+                    create_time: 0,
+                    title: Some("report.pdf".into()),
+                    msg_index: 1,
+                },
+            ],
+            Arc::new(ctx),
+            Some(1),
+        );
+        let (media, _, errors, statuses) = collect(results, &DupMap { duplicates: vec![] }, 2);
+        assert!(media.iter().all(Vec::is_empty));
+        assert_eq!(errors.errors.len(), 2);
+        assert!(statuses.iter().all(|status| *status
+            == Some(MediaStatus::new(
+                MediaState::Error,
+                Some("media_database_error"),
+            ))));
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join("output"))
+                .unwrap()
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn only_typed_absence_is_missing_and_duplicate_hard_errors_remain_errors() {
+        for error in [
+            MediaError::SchemaMissing("not found".into()),
+            MediaError::Sqlite(rusqlite::Error::InvalidQuery),
+            MediaError::Io(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            MediaError::MissingV2Key,
+            MediaError::AesDecryptFailed {
+                reason: "missing file".into(),
+            },
+            MediaError::XorKeyDetectionFailed,
+            MediaError::InvalidFormat {
+                reason: "not found".into(),
+            },
+        ] {
+            let result = lookup_failed(0, "image", "abc", error);
+            let (media, _, _, statuses) = collect(
+                vec![result],
+                &DupMap {
+                    duplicates: vec![(1, 0)],
+                },
+                2,
+            );
+            assert!(media.iter().all(Vec::is_empty));
+            assert_eq!(statuses[0], statuses[1]);
+            assert_eq!(statuses[1].unwrap().state, MediaState::Error);
+            let summary = crate::cmd::export_media::MediaSummary::from_statuses(&statuses, false);
+            assert_eq!(
+                (summary.expected, summary.errors, summary.missing),
+                (2, 2, 0)
+            );
+        }
+    }
+
+    #[test]
+    fn image_decode_and_output_not_found_are_hard_not_missing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctx = media_context(tmp.path());
+        let hash = format!("{:x}", wx_media::md5_hash(b"wxid_test"));
+        let img = ctx.attach_dir.join(hash).join("2026-10").join("Img");
+        std::fs::create_dir_all(&img).unwrap();
+        let encrypted: Vec<_> = b"wxgf".iter().map(|byte| byte ^ 0xa5).collect();
+        std::fs::write(img.join("bad.dat"), encrypted).unwrap();
+        let result = resolve_image("bad", 0, &ctx);
+        assert!(result.asset.is_none());
+        assert_eq!(
+            result.error.unwrap().status,
+            MediaStatus::new(MediaState::Error, Some("media_decode_error"))
+        );
+        let source = tmp.path().join("source.pdf");
+        std::fs::write(&source, b"real attachment").unwrap();
+        let result = copy_source(
+            &source,
+            "asset.pdf".into(),
+            MediaKind::File,
+            "file",
+            "abc",
+            0,
+            &ctx,
+            vec![],
+        );
+        assert!(result.asset.is_none());
+        assert_eq!(
+            result.error.unwrap().status,
+            MediaStatus::new(MediaState::Error, Some("media_write_error"))
+        );
+    }
+
+    #[test]
+    fn interrupted_enumeration_restart_keeps_later_entries() {
+        // A ReadDir can be exhausted after an error, so an interrupted scan
+        // must restart the directory instead of skipping the error; the file
+        // that had not been reached yet may not be lost.
+        let mut opens = 0;
+        let entries = enumerate_complete(|| {
+            opens += 1;
+            match opens {
+                1 => Ok(Some(
+                    vec![
+                        Ok("a.dat"),
+                        Err(std::io::Error::from(std::io::ErrorKind::Interrupted)),
+                    ]
+                    .into_iter(),
+                )),
+                _ => Ok(Some(
+                    vec![Ok("a.dat"), Ok("b-after-interrupt.dat")].into_iter(),
+                )),
+            }
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(entries, ["a.dat", "b-after-interrupt.dat"]);
+    }
+
+    #[test]
+    fn interrupted_directory_open_is_retried() {
+        let mut opens = 0;
+        let entries: Option<Vec<&str>> = enumerate_complete(|| {
+            opens += 1;
+            if opens == 1 {
+                return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
+            }
+            Ok(Some(vec![Ok("a.dat")].into_iter()))
+        })
+        .unwrap();
+        assert_eq!(entries, Some(vec!["a.dat"]));
+    }
+
+    #[test]
+    fn hard_enumeration_errors_stay_hard_not_partial_scans() {
+        // Permission failures are never retried away, never turned into
+        // absence, and never yield the partial entries collected so far.
+        let error = enumerate_complete(|| {
+            Ok(Some(
+                vec![
+                    Ok("a.dat"),
+                    Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+                ]
+                .into_iter(),
+            ))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+    }
+
+    #[test]
+    fn image_snapshot_keeps_selection_conventions_and_refreshes_per_export() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hash = format!("{:x}", wx_media::md5_hash(b"wxid_test"));
+        let base = tmp.path().join("attach").join(&hash);
+        let put = |month: &str, name: &str| {
+            let img = base.join(month).join("Img");
+            std::fs::create_dir_all(&img).unwrap();
+            std::fs::write(img.join(name), b"dat").unwrap();
+        };
+        put("2026-01", "md5x_t.dat");
+        put("2026-02", "md5x.dat");
+        put("2026-01", "md5y.dat");
+        put("2026-02", "md5y.dat");
+        let ctx = media_context(tmp.path());
+        // The exact full image beats the thumbnail.
+        assert_eq!(
+            find_image(&ctx, "md5x").unwrap().file_name().unwrap(),
+            "md5x.dat"
+        );
+        // The same file name in two months resolves deterministically to the
+        // sorted-first path, like the per-md5 scan did.
+        assert_eq!(
+            find_image(&ctx, "md5y").unwrap(),
+            base.join("2026-01").join("Img").join("md5y.dat").as_path()
+        );
+        assert!(matches!(
+            find_image(&ctx, "absent"),
+            Err(ImageLookupError::Missing)
+        ));
+        // A new export re-snapshots, so newly downloaded media is visible…
+        put("2026-03", "md5x_h.dat");
+        let refreshed = media_context(tmp.path());
+        assert_eq!(
+            find_image(&refreshed, "md5x").unwrap().file_name().unwrap(),
+            "md5x_h.dat"
+        );
+        // …while the old export's snapshot stays stable within that export.
+        assert_eq!(
+            find_image(&ctx, "md5x").unwrap().file_name().unwrap(),
+            "md5x.dat"
+        );
+    }
+
+    #[test]
+    fn image_scan_hard_errors_remain_errors_across_lookups() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctx = media_context(tmp.path());
+        let hash = format!("{:x}", wx_media::md5_hash(b"wxid_test"));
+        let img = ctx.attach_dir.join(hash).join("2026-01").join("Img");
+        std::fs::create_dir_all(img.parent().unwrap()).unwrap();
+        std::fs::write(&img, b"file where the Img directory is expected").unwrap();
+        for msg_index in 0..2 {
+            let result = resolve_image("abc", msg_index, &ctx);
+            assert!(result.asset.is_none());
+            assert_eq!(
+                result.error.unwrap().status,
+                MediaStatus::new(MediaState::Error, Some("media_read_error"))
+            );
+        }
+    }
+
+    #[test]
+    fn invalid_source_directory_is_hard_not_absence() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let ctx = media_context(tmp.path());
+        std::fs::write(&ctx.video_dir, b"not a directory").unwrap();
+        let result = resolve_video("abc", 0, 0, &ctx);
+        assert!(result.asset.is_none());
+        assert_eq!(result.error.unwrap().status.state, MediaState::Error);
+    }
 
     #[test]
     fn test_classify_empty_messages() {
@@ -1134,11 +1720,20 @@ mod tests {
     }
 
     #[test]
-    fn test_write_gate_prevents_duplicate_writes() {
+    fn failed_write_does_not_publish_asset_to_later_message() {
+        let tmp = tempfile::TempDir::new().unwrap();
         let gate = WriteGate::new();
-        assert!(gate.claim("file1.jpg"));
-        assert!(!gate.claim("file1.jpg")); // second claim returns false
-        assert!(gate.claim("file2.jpg"));
+        let path = tmp.path().join("asset");
+        let error = gate.write("asset", || {
+            Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+        });
+        assert_eq!(
+            error.unwrap_err().kind(),
+            std::io::ErrorKind::PermissionDenied
+        );
+        gate.write("asset", || std::fs::write(&path, b"actual media"))
+            .unwrap();
+        assert_eq!(std::fs::read(path).unwrap(), b"actual media");
     }
 
     // --- Parity / integration tests ---
@@ -1174,7 +1769,7 @@ mod tests {
             error: None,
         }];
 
-        let (media_map, stats, _errors) = collect(results, &dup_map, 2);
+        let (media_map, stats, _errors, _) = collect(results, &dup_map, 2);
 
         // Both messages should have the asset
         assert_eq!(media_map[0].len(), 1);
@@ -1214,7 +1809,7 @@ mod tests {
             error: None,
         }];
 
-        let (media_map, stats, _errors) = collect(results, &dup_map, 2);
+        let (media_map, stats, _errors, _) = collect(results, &dup_map, 2);
 
         assert_eq!(media_map[0].len(), 1);
         assert_eq!(media_map[1].len(), 1);
@@ -1250,7 +1845,7 @@ mod tests {
             error: None,
         }];
 
-        let (_, stats, _) = collect(results, &dup_map, 2);
+        let (_, stats, _, _) = collect(results, &dup_map, 2);
 
         // fallback_videos counted for each message (old behavior)
         assert_eq!(stats.fallback_videos, 2);
@@ -1282,7 +1877,7 @@ mod tests {
             error: None,
         }];
 
-        let (_, stats, _) = collect(results, &dup_map, 2);
+        let (_, stats, _, _) = collect(results, &dup_map, 2);
 
         // skipped_videos counted for each message (old behavior: unconditional count)
         assert_eq!(stats.skipped_videos, 2);
@@ -1333,7 +1928,7 @@ mod tests {
             },
         ];
 
-        let (media_map, _stats, _errors) = collect(results, &dup_map, 3);
+        let (media_map, _stats, _errors, _) = collect(results, &dup_map, 3);
 
         // All 3 messages should have their assets
         assert_eq!(media_map[0].len(), 1);
@@ -1356,6 +1951,8 @@ mod tests {
                 message: Message {
                     sort_seq: 0,
                     server_id: 1,
+                    local_id: 1,
+                    source_shard: None,
                     msg_type: 3,
                     sub_type: 0,
                     sender: "a".into(),
@@ -1374,6 +1971,8 @@ mod tests {
                 message: Message {
                     sort_seq: 1,
                     server_id: 2,
+                    local_id: 2,
+                    source_shard: None,
                     msg_type: 34,
                     sub_type: 0,
                     sender: "a".into(),
@@ -1390,6 +1989,8 @@ mod tests {
                 message: Message {
                     sort_seq: 2,
                     server_id: 3,
+                    local_id: 3,
+                    source_shard: None,
                     msg_type: 43,
                     sub_type: 0,
                     sender: "a".into(),
@@ -1479,6 +2080,8 @@ mod tests {
             &wx_db::Message {
                 sort_seq: 0,
                 server_id: 1,
+                local_id: 1,
+                source_shard: None,
                 msg_type: 3,
                 sub_type: 0,
                 sender: "sender".into(),
@@ -1508,12 +2111,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(&output_media);
         std::fs::create_dir_all(&output_media).unwrap();
 
-        let tasks = vec![MediaTask::Image {
-            md5: md5.to_string(),
-            msg_index: 0,
-        }];
-        let (results, _) = resolve_parallel(tasks, std::sync::Arc::new(ctx), Some(1));
-        let (media_map, stats, _) = collect(results, &DupMap { duplicates: vec![] }, 1);
+        let tasks = vec![
+            MediaTask::Image {
+                md5: md5.to_string(),
+                msg_index: 0,
+            },
+            MediaTask::Image {
+                md5: md5.to_string(),
+                msg_index: 1,
+            },
+        ];
+        let (tasks, duplicates) = dedup(tasks);
+        let results = resolve_parallel(tasks, std::sync::Arc::new(ctx), Some(1));
+        let (media_map, stats, errors, statuses) = collect(results, &duplicates, 2);
+        assert!(errors.errors.is_empty());
+        assert_eq!(
+            statuses,
+            vec![Some(MediaStatus::new(MediaState::Available, None)); 2]
+        );
+        let summary = crate::cmd::export_media::MediaSummary::from_statuses(&statuses, false);
+        assert_eq!(
+            (
+                summary.expected,
+                summary.available,
+                summary.missing,
+                summary.errors
+            ),
+            (2, 2, 0, 0)
+        );
+        assert_eq!(media_map[0][0].filename, media_map[1][0].filename);
 
         // Compare: both should produce the same filename
         assert_eq!(serial_assets.len(), 1);
@@ -1534,7 +2160,6 @@ mod tests {
         silk_rs::encode_silk(vec![0_u8; 24_000 / 1_000 * 40 * 2], 24_000, 24_000, true).unwrap()
     }
 
-    #[cfg(feature = "audio")]
     fn create_voice_media_db(path: &Path, rows: &[(i64, i64, i64, i64, &[u8])]) {
         let conn = rusqlite::Connection::open(path).unwrap();
         conn.execute_batch(

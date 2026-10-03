@@ -5,6 +5,7 @@ expression: result.messages
 ---
 - sort_seq: 500
   server_id: 900005
+  local_id: 1
   msg_type: 49
   sub_type: 5
   sender: wxid_test_alice

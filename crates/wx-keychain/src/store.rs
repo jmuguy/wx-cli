@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Utc};
@@ -94,12 +95,28 @@ impl KeyStore {
         let parent_existed = path.parent().is_none_or(|p| p.exists());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
+            #[cfg(unix)]
+            if !parent_existed {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(parent, fs::Permissions::from_mode(0o700))?;
+            }
         }
         let content = toml::to_string_pretty(self)
             .map_err(|e| KeychainError::Store(format!("failed to serialize: {}", e)))?;
 
         let tmp_path = path.with_extension("toml.tmp");
-        fs::write(&tmp_path, &content)?;
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&tmp_path)?;
+        file.write_all(content.as_bytes()).inspect_err(|_| {
+            let _ = fs::remove_file(&tmp_path);
+        })?;
+        drop(file);
         fs::rename(&tmp_path, path).inspect_err(|_| {
             // Clean up the temp file on rename failure.
             let _ = fs::remove_file(&tmp_path);
@@ -355,6 +372,48 @@ impl KeyStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn saved_keys_are_private_on_creation_and_replacement() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config/keys.toml");
+        let mut store = KeyStore::default();
+        let first_key = "11".repeat(32);
+        store.set("wxid_private", &first_key, "4.1.15", None, None);
+        store.save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            fs::metadata(path.parent().unwrap())
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o700
+        );
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        let replacement_key = "22".repeat(32);
+        store.set("wxid_private", &replacement_key, "4.1.15", None, None);
+        store.save(&path).unwrap();
+        assert_eq!(
+            fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            KeyStore::load(&path)
+                .unwrap()
+                .get("wxid_private")
+                .unwrap()
+                .data_key,
+            replacement_key
+        );
+    }
 
     #[test]
     fn test_old_keys_toml_without_nickname_base_wxid() {

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template only. install-launchd.sh substitutes __PYTHON__, __ARCHIVE_SCRIPT__
+     and __ARCHIVE_ROOT__ via plistlib and installs with mode 0600.
+     Nothing loads automatically. The CLI refreshes the decrypt cache first. -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.howie.wechat-archive.reconcile</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>__PYTHON__</string>
+		<string>__ARCHIVE_SCRIPT__</string>
+		<string>--root</string>
+		<string>__ARCHIVE_ROOT__</string>
+		<string>reconcile</string>
+	</array>
+	<!-- Weekly on Sunday (launchd Weekday 0), off the hourly discover slot. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Weekday</key>
+		<integer>0</integer>
+		<key>Hour</key>
+		<integer>4</integer>
+		<key>Minute</key>
+		<integer>17</integer>
+	</dict>
+	<key>ProcessType</key>
+	<string>Background</string>
+	<key>RunAtLoad</key>
+	<false/>
+	<key>StandardOutPath</key>
+	<string>__ARCHIVE_ROOT__/logs/reconcile.out.log</string>
+	<key>StandardErrorPath</key>
+	<string>__ARCHIVE_ROOT__/logs/reconcile.err.log</string>
+</dict>
+</plist>

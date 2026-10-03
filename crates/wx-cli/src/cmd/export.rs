@@ -8,7 +8,7 @@ use wx_context::{
 use wx_db::{is_group_chat, MessageContent, MessageQuery, SortOrder, MAX_QUERY_LIMIT};
 
 use crate::cmd::contacts::build_visibility;
-use crate::cmd::export_media::{MediaKind, MediaStats};
+use crate::cmd::export_media::{MediaKind, MediaStats, MediaStatus, MediaSummary};
 use crate::cmd::query::resolve_talker;
 use crate::output::{JsonEnvelope, PagingMeta, StatsMeta};
 use crate::schema::{enrich_message, project_message_items, EnrichedMessage};
@@ -24,6 +24,7 @@ use crate::{ExportFormat, SortOrderArg};
 struct ExportEnvelope<T: Serialize> {
     export_info: ExportInfo,
     conversation: ConversationMeta,
+    media: MediaSummary,
     #[serde(flatten)]
     envelope: JsonEnvelope<T>,
 }
@@ -54,6 +55,8 @@ struct ExportedMessage {
     enriched: EnrichedMessage,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     media_files: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    media_status: Option<MediaStatus>,
 }
 
 // ── Main entry ──────────────────────────────────────────────────────
@@ -246,9 +249,13 @@ pub fn cmd_export(
         std::fs::create_dir_all(&media_dir)?;
     }
 
-    // Resolve media via parallel pipeline (or skip)
-    let (media_map, media_stats, _media_errors) = if no_media {
-        (vec![vec![]; projected.len()], MediaStats::default(), None)
+    // Resolve media via parallel pipeline, retaining a status for every eligible item.
+    let (media_map, media_stats, media_statuses) = if no_media {
+        (
+            vec![vec![]; projected.len()],
+            MediaStats::default(),
+            crate::cmd::export_task::initial_statuses(&projected, true),
+        )
     } else if let Some(c) = cache.as_ref() {
         let attach_dir = acct.data_dir.join("msg").join("attach");
         let decrypted_media = c.decrypted_root().join("message");
@@ -276,26 +283,35 @@ pub fn cmd_export(
 
         let tasks = crate::cmd::export_task::classify(&projected);
         let (unique_tasks, dup_map) = crate::cmd::export_task::dedup(tasks);
-        let (results, resolve_errors) = crate::cmd::export_task::resolve_parallel(
+        let results = crate::cmd::export_task::resolve_parallel(
             unique_tasks,
             std::sync::Arc::new(ctx),
             parallel,
         );
-        let (media_map, stats, collect_errors) =
+        let (media_map, stats, errors, mut statuses) =
             crate::cmd::export_task::collect(results, &dup_map, projected.len());
-
-        let combined = crate::cmd::export_task::ErrorSummary {
-            errors: resolve_errors
-                .errors
-                .into_iter()
-                .chain(collect_errors.errors)
-                .collect(),
-        };
-        combined.print_report();
-        (media_map, stats, Some(combined))
+        for (status, message) in statuses.iter_mut().zip(&projected) {
+            if status.is_none() {
+                *status = crate::cmd::export_task::initial_status(message, false);
+            }
+        }
+        errors.print_report();
+        (media_map, stats, statuses)
     } else {
-        (vec![vec![]; projected.len()], MediaStats::default(), None)
+        (
+            vec![vec![]; projected.len()],
+            MediaStats::default(),
+            crate::cmd::export_task::initial_statuses(&projected, false),
+        )
     };
+    for status in media_statuses.iter().flatten() {
+        match status.reason {
+            Some("missing_reference") => eprintln!("media unavailable: missing reference"),
+            Some("media_cache_unavailable") => eprintln!("error: media cache unavailable"),
+            _ => {}
+        }
+    }
+    let media_summary = MediaSummary::from_statuses(&media_statuses, no_media);
 
     let total_media: usize = media_map.iter().map(Vec::len).sum();
 
@@ -337,6 +353,8 @@ pub fn cmd_export(
                 is_group,
                 projected,
                 &media_map,
+                &media_statuses,
+                media_summary,
                 effective_limit,
                 offset,
                 total_count.unwrap_or(0),
@@ -506,6 +524,8 @@ fn write_json(
     is_group: bool,
     messages: Vec<EnrichedMessage>,
     media_map: &[Vec<crate::cmd::export_media::MediaAsset>],
+    media_statuses: &[Option<MediaStatus>],
+    media_summary: MediaSummary,
     effective_limit: usize,
     user_offset: usize,
     total: usize,
@@ -525,6 +545,7 @@ fn write_json(
             ExportedMessage {
                 enriched,
                 media_files,
+                media_status: media_statuses[i],
             }
         })
         .collect();
@@ -546,6 +567,7 @@ fn write_json(
             time_range_start,
             time_range_end,
         },
+        media: media_summary,
         envelope: JsonEnvelope {
             items: exported_items,
             paging: PagingMeta {
@@ -652,103 +674,93 @@ use chrono::Datelike;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cmd::export_media::{MediaAsset, MediaStats};
+    use crate::cmd::export_media::MediaAsset;
     use crate::schema::enrich_message;
     use rusqlite::Connection;
 
     #[test]
-    fn media_asset_paths_follow_asset_filenames() {
-        let paths = media_asset_paths(&[
-            MediaAsset {
-                kind: MediaKind::Image,
-                filename: "4865625c4e99e4d3b0959a0fe84f41cd.png".into(),
-            },
-            MediaAsset {
-                kind: MediaKind::Image,
-                filename: "cdb2f853d5e1cdebbdc66bb8c80e1714.wxgf".into(),
-            },
-        ]);
-
-        assert_eq!(
-            paths,
-            vec![
-                "media/4865625c4e99e4d3b0959a0fe84f41cd.png".to_string(),
-                "media/cdb2f853d5e1cdebbdc66bb8c80e1714.wxgf".to_string(),
-            ]
-        );
-    }
-
-    #[test]
-    fn media_quality_hints_include_wxgf_summary_lines() {
-        let hints = media_quality_hints(&MediaStats {
-            wxgf_transcoded: 2,
-            wxgf_fallback: 1,
-            ..MediaStats::default()
-        });
-
-        assert!(hints.contains(&"hint: 2 wxgf image(s) transcoded to standard image format".into()));
-        assert!(hints.contains(
-            &"hint: 1 wxgf image(s) kept as .wxgf - install ffmpeg for PNG/GIF export".into()
-        ));
-    }
-
-    #[test]
-    fn write_json_uses_asset_filenames_for_media_files() {
+    fn json_marks_all_eligible_contents_even_without_references_or_cache() {
         let tmp = tempfile::TempDir::new().unwrap();
         let resolver = test_resolver(tmp.path());
-        let out_path = tmp.path().join("export.json");
-
-        write_json(
-            &out_path,
-            "wxid_other",
-            "Alice",
-            false,
-            vec![sample_enriched_message(&resolver)],
-            &[vec![MediaAsset {
-                kind: MediaKind::Image,
-                filename: "4865625c4e99e4d3b0959a0fe84f41cd.png".into(),
-            }]],
-            100,
-            0,
-            1,
-            1,
-            0,
-            vec![],
-        )
-        .unwrap();
-
-        let json = std::fs::read_to_string(out_path).unwrap();
-        assert!(json.contains("\"media_files\": ["));
-        assert!(json.contains("\"media/4865625c4e99e4d3b0959a0fe84f41cd.png\""));
-    }
-
-    #[test]
-    fn write_json_keeps_wxgf_media_paths_when_asset_filename_is_wxgf() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let resolver = test_resolver(tmp.path());
-        let out_path = tmp.path().join("export-wxgf.json");
-
-        write_json(
-            &out_path,
-            "wxid_other",
-            "Alice",
-            false,
-            vec![sample_enriched_message(&resolver)],
-            &[vec![MediaAsset {
-                kind: MediaKind::Image,
-                filename: "cdb2f853d5e1cdebbdc66bb8c80e1714.wxgf".into(),
-            }]],
-            100,
-            0,
-            1,
-            1,
-            0,
-            vec![],
-        )
-        .unwrap();
-
-        let json = std::fs::read_to_string(out_path).unwrap();
-        assert!(json.contains("\"media/cdb2f853d5e1cdebbdc66bb8c80e1714.wxgf\""));
+        let contents = [
+            MessageContent::Image { md5: None },
+            MessageContent::Video {
+                md5: Some(String::new()),
+            },
+            MessageContent::File {
+                md5: None,
+                title: Some("report.pdf".into()),
+                file_ext: None,
+                file_size: None,
+                raw_xml: String::new(),
+            },
+            MessageContent::Voice,
+            MessageContent::Image {
+                md5: Some("abc".into()),
+            },
+            MessageContent::Text("keep this text".into()),
+        ];
+        for no_media in [false, true] {
+            let messages: Vec<_> = contents
+                .iter()
+                .map(|content| {
+                    let mut message = sample_image_message();
+                    message.content = content.clone();
+                    enrich_message(message, "wxid_me", &resolver)
+                })
+                .collect();
+            let statuses = crate::cmd::export_task::initial_statuses(&messages, no_media);
+            let out_path = tmp.path().join("export.json");
+            write_json(
+                &out_path,
+                "wxid_other",
+                "Alice",
+                false,
+                messages,
+                &vec![vec![]; contents.len()],
+                &statuses,
+                MediaSummary::from_statuses(&statuses, no_media),
+                100,
+                0,
+                contents.len(),
+                contents.len(),
+                0,
+                vec![],
+            )
+            .unwrap();
+            let json: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(out_path).unwrap()).unwrap();
+            assert_eq!(json["media"]["version"], 1);
+            assert_eq!(json["media"]["expected"], 5);
+            assert_eq!(json["media"]["available"], 0);
+            assert!(json["items"][5].get("media_status").is_none());
+            for item in json["items"].as_array().unwrap() {
+                assert!(item.get("media_files").is_none());
+            }
+            if no_media {
+                assert_eq!(json["media"]["mode"], "metadata_only");
+                assert_eq!(json["media"]["not_attempted"], 5);
+                assert_eq!(json["media"]["errors"], 0);
+                assert_eq!(json["media"]["missing"], 0);
+                for item in &json["items"].as_array().unwrap()[..5] {
+                    assert_eq!(item["media_status"]["state"], "metadata_only");
+                }
+            } else {
+                assert_eq!(json["media"]["mode"], "enabled");
+                assert_eq!(json["media"]["not_attempted"], 0);
+                assert_eq!(json["media"]["missing"], 3);
+                assert_eq!(json["media"]["errors"], 2);
+                for item in &json["items"].as_array().unwrap()[..3] {
+                    assert_eq!(item["media_status"]["state"], "missing");
+                    assert_eq!(item["media_status"]["reason"], "missing_reference");
+                }
+                assert_eq!(json["items"][3]["media_status"]["state"], "error");
+                assert_eq!(
+                    json["items"][4]["media_status"]["reason"],
+                    "media_cache_unavailable"
+                );
+            }
+        }
     }
 
     #[test]
@@ -782,6 +794,8 @@ mod tests {
         wx_db::Message {
             sort_seq: 1,
             server_id: 1,
+            local_id: 1,
+            source_shard: None,
             msg_type: wx_db::MSG_TYPE_IMAGE,
             sub_type: 0,
             sender: "wxid_other".into(),

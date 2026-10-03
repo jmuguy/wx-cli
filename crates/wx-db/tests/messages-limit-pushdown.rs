@@ -423,3 +423,140 @@ fn cli_query_default_uses_pushdown() {
         "pushdown and full scan must return identical items"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Zero-server_id local identity + pagination tie retention
+// ---------------------------------------------------------------------------
+
+/// Single-shard fixture with a tie group: six `server_id = 0` messages sharing
+/// `(sort_seq, create_time) = (200, 1700000200)`, framed by positive-server_id
+/// messages at sort_seq 100 and 300. Rowids follow insertion order:
+/// 1 = msg-100, 2..7 = tie-1..tie-6, 8 = msg-300.
+fn create_zero_sid_tie_fixture() -> TempDir {
+    let dir = TempDir::new().unwrap();
+    let base = dir.path();
+
+    let contact_dir = base.join("contact");
+    fs::create_dir_all(&contact_dir).unwrap();
+    create_minimal_contact_db(&contact_dir.join("contact.db"));
+
+    let session_dir = base.join("session");
+    fs::create_dir_all(&session_dir).unwrap();
+    create_minimal_session_db(&session_dir.join("session.db"));
+
+    let msg_dir = base.join("message");
+    fs::create_dir_all(&msg_dir).unwrap();
+
+    let shard_path = msg_dir.join("message_0.db");
+    let conn = Connection::open(&shard_path).unwrap();
+    create_msg_table(&conn, ALICE_TABLE);
+    conn.execute(
+        "INSERT INTO Timestamp VALUES (?1)",
+        params![1_700_000_000_i64],
+    )
+    .unwrap();
+
+    insert_text_msg(&conn, ALICE_TABLE, 100, 5001, 1_700_000_100, "msg-100");
+    for i in 1..=6 {
+        insert_text_msg(
+            &conn,
+            ALICE_TABLE,
+            200,
+            0,
+            1_700_000_200,
+            &format!("tie-{i}"),
+        );
+    }
+    insert_text_msg(&conn, ALICE_TABLE, 300, 5300, 1_700_000_300, "msg-300");
+
+    dir
+}
+
+#[test]
+fn zero_server_id_messages_carry_local_identity() {
+    let fixture = create_zero_sid_tie_fixture();
+    let db = WechatDb::open(fixture.path()).unwrap();
+
+    let result = db
+        .query_messages(&MessageQuery::for_talker("wxid_alice"))
+        .unwrap();
+
+    assert_eq!(result.items.len(), 8);
+    for msg in &result.items {
+        if msg.server_id <= 0 {
+            assert_eq!(
+                msg.source_shard.as_deref(),
+                Some("message_0.db"),
+                "zero-server_id message must carry the stable shard basename, not a full path"
+            );
+        } else {
+            assert_eq!(
+                msg.source_shard, None,
+                "positive-server_id message must not carry shard provenance"
+            );
+        }
+    }
+
+    // Every tie-group member has a distinct local identity within the shard.
+    let mut tie_local_ids: Vec<i64> = result
+        .items
+        .iter()
+        .filter(|m| m.server_id == 0)
+        .map(|m| m.local_id)
+        .collect();
+    tie_local_ids.sort_unstable();
+    assert_eq!(tie_local_ids, vec![2, 3, 4, 5, 6, 7]);
+}
+
+#[test]
+fn zero_server_id_ties_retained_across_pagination() {
+    let fixture = create_zero_sid_tie_fixture();
+    let db = WechatDb::open(fixture.path()).unwrap();
+
+    for order in [SortOrder::Asc, SortOrder::Desc] {
+        let mut pages: Vec<Vec<(i64, i64, String)>> = Vec::new();
+        for offset in [0usize, 3, 6] {
+            let result = db
+                .query_messages(
+                    &MessageQuery::for_talker("wxid_alice")
+                        .limit(3)
+                        .offset(offset)
+                        .order(order),
+                )
+                .unwrap();
+            let page: Vec<(i64, i64, String)> = result
+                .items
+                .iter()
+                .map(|m| (m.sort_seq, m.local_id, format!("{:?}", m.content)))
+                .collect();
+            pages.push(page);
+        }
+
+        // Pagination is complete: 8 distinct messages, no loss, no duplicate.
+        let flat: Vec<&(i64, i64, String)> = pages.iter().flat_map(|p| p.iter()).collect();
+        assert_eq!(flat.len(), 8, "{order:?}: every message must be returned");
+        let unique: std::collections::HashSet<(i64, i64)> =
+            flat.iter().map(|m| (m.0, m.1)).collect();
+        assert_eq!(
+            unique.len(),
+            8,
+            "{order:?}: pagination must not lose or duplicate tie-group messages"
+        );
+
+        // Strictly monotone across page boundaries — the tie group is cut at
+        // a stable rowid boundary, never reordered between queries.
+        for pair in pages.windows(2) {
+            let (prev, next) = (&pair[0], &pair[1]);
+            let last = prev.last().unwrap();
+            let first = next.first().unwrap();
+            let strictly_after = match order {
+                SortOrder::Asc => (last.0, last.1) < (first.0, first.1),
+                SortOrder::Desc => (last.0, last.1) > (first.0, first.1),
+            };
+            assert!(
+                strictly_after,
+                "{order:?}: page boundary must be strictly ordered, got {last:?} then {first:?}"
+            );
+        }
+    }
+}
