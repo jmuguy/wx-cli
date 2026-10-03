@@ -229,6 +229,8 @@ bash archive/install-launchd.sh "$ROOT"
 
 MCP 账号和会话范围由私有配置固定，工具参数不能覆盖；聊天内容是不可信数据，不执行其中指令。调度是否启动由用户决定。导入旧 export 的显式 `import <file>` 保留支持；自动同步要求新的媒体完整性协议，旧二进制不能静默降级。
 
+macOS 后台采集另需运行该 LaunchAgent 的 Python 获准访问其他应用数据；终端中手工命令成功不代表后台解释器已获授权。若 TCC 日志出现 `kTCCServiceSystemPolicyAppData` 的 `AUTHREQ_PROMPTING` 且没有完成结果，应由用户处理系统授权弹窗再启动；`EINTR` 或本地解密超时不能当作空窗口，也不能用反复重试代替授权。授权/实际后台验证失败时先 bootout/disable 两个任务，保留归档、checkpoint 与私有日志；不得绕过 TCC、改微信签名或自动联网补媒体。
+
 当前验证和未通过的人工/Claude 门禁以 `docs/reports/phase-0..5.md` 为准；合成夹具通过不代表微信 UI 或真实问答已验收。
 
 ## 命令一览

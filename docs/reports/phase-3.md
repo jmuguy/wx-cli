@@ -39,7 +39,7 @@ v1 media manifest 按顶层 Image/Voice/Video/File 消息计数，区分 availab
 
 Claude 复核新增密钥保存回归：固定临时文件遗留导致 AlreadyExists 已先失败复现，再改唯一私有临时文件原子替换。实际进程 smoke 验证保存/重载、未知遗留文件不变、0600/0700；完整 Rust 门禁与 Claude 修复复核通过，细节见 phase-4。
 
-同秒 server/local 混合排序回归：旧代码真实失败 2 Rust + 1 Python（artifact 298/297），修复为 local_id/rowid 先于 server_id，并同步 SQL LIMIT、双向分页与锚点游标。覆盖同秒跨分片 rowid 重号、正反逐条分页、全扫描/SQL LIMIT、server/序号锚点、混合身份、中文 FTS 与短词 LIKE。实际 release query 三个原组身份集合均不变、skipped=0、无残页；第一组与实际 stdio MCP get_context 均返回 local_id 3626..3635、文字后9图，再接下一文本。MCP 调用前后归档字节/mtime 不变，不修改数据库或历史数据。Claude 新排序评审及原始上下文复核通过，详见 phase-4；第一组 UI 构成获用户确认，另两组及图片内容未验证。
+同秒 server/local 混合排序回归：旧代码真实失败 2 Rust + 1 Python（artifact 298/297），修复为 local_id/rowid 先于 server_id，并同步 SQL LIMIT、双向分页与锚点游标。覆盖同秒跨分片 rowid 重号、正反逐条分页、全扫描/SQL LIMIT、server/序号锚点、混合身份、中文 FTS 与短词 LIKE。实际 release query 三个原组身份集合均不变、skipped=0、无残页；第一组与实际 stdio MCP get_context 均返回 local_id 3626..3635、文字后9图，再接下一文本。MCP 调用前后归档字节/mtime 不变，不修改数据库或历史数据。Claude 新排序评审及原始上下文复核通过，详见 phase-4；三组消息构成的UI现均获用户确认，缺失图片字节不从此推定已验证。
 
 隔离变异结果：25 个 Python + 3 个 Rust，28/28 被对应行为回归击杀；不是编译失败或测试发现错误。
 
@@ -59,6 +59,14 @@ Rust 变异使用了独立源码副本，但曾共享 target，随后主仓门�
 
 ## 调度与门禁
 
-安装器真实运行于隔离 HOME，含空格/引号路径；两个 plist 均 0600、RunAtLoad=false，渲染命令实际 `--help` exit 0。解释器为稳定 `/opt/homebrew/bin/python3`；没有安装或 load 真实用户 LaunchAgents。每小时 discover、周日 04:17 reconcile 的自动启动仍由用户决定，不声称后台定时归档已经运行。
+安装器隔离 HOME 实跑两个私有 plist、空格引号路径与渲染命令 --help exit0 的记录保留。2026-10-03用户明确批准启动，真实两个plist安装0600，解释器/白名单/每小时Minute0与周日04:17均核对，并在gui/501实际bootstrap/kickstart。首个小时任务exit0：导入37、新增35、内容修订0、9媒体文件、missing0，checkpoint1790994648→1791036904。后续周任务/再启动出现原生EINTR或1800秒解密超时；已卸载并禁用两任务，不声称定时后台现在在运行。
 
-技术实现与实跑已完成。Claude 独立源码评审及真实模型 MCP 调用均已通过（phase-4）；三个日期窗口、三组同秒消息构成与三个问答业务判断已由用户确认（phase-5），G5通过。调度按计划仅交付模板/安装器，是否启动由用户另行决定，不阻塞本任务完成。
+原归档/MCP约定验收已完成：Claude独立源码评审及真实模型调用、三个日期窗口、三组同秒消息构成与三个问答判断均通过（phase-4/5）。计划只要求调度模板/安装器，原开发任务仍done；本次用户随后授权的启用任务TASK-20261003-220942-6344因实际系统权限阻塞而blocked。
+
+决定性系统证据：2026-10-04 02:40:45，TCC的SystemPolicyAppData请求将responsible解释器归为python3.14，实际访问者为wx-cli；同组预检authValue=0，后续AUTHREQ_PROMPTING没有捕获到完成结果。对应后台父/子pid82754/82755与最后一次失败任务一致。必须由用户处理该Python读取其他应用数据的系统弹窗；没有修改TCC数据库、赋予全盘访问、重签/重启微信或改真实keystore。用户后台启用授权不是系统隐私授权的替代。
+
+排查中目录EINTR重试/资源类型候选虽通过静态复核与测试，但真实后台仍失败；不采信这些候选为运行已修复，生产改动已全部撤回，ProcessType恢复原Background。最终完整门禁Rust807 passed/46suites/11ignored、clippy -D warnings/release通过；Python63+65已通过。测试数比已验收809少2，仅删除两项钉住终端标签文案的断言，其中一项调用真实微信状态并造成门禁挂起；保留paths JSON字段契约与所有业务回归，实际release paths --json exit0且路径与真实私有store位置一致。故障注入库的探针超时、未形成证据，不计为失败前/修复后证明；相关临时源文件/动态库已清除。
+
+最终实际只读status exit0：83249消息/83249初始及修订版本、可用媒体消息4530、明确源缺失6091、仅一个会话，checkpoint1791036904。两个任务print均不存在、print-disabled均disabled；plist/日志0600，归档保留。真实keystore哈希与本次建立的基线相同，mtime早于启用开始。记录在ROOT/scheduler-activation-875zzki8（0700/0600），仅保留元数据与私有故障证据；仓库不写群聊原文。下一步系统弹窗批准后重新核验两个真实后台程序，不直接标启动完成。
+
+另发现源码分片枚举filter_map(ok)可能忽略目录迭代错误，独立backlog TASK-20261004-031258-519C记录；未证明它是本次故障原因，不在当前启用任务偷偷扩展修复范围。
