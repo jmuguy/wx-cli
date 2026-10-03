@@ -76,6 +76,22 @@ class StoreTests(unittest.TestCase):
         path.write_text(json.dumps(data, ensure_ascii=False), encoding='utf-8')
         return (archive or self.store).import_export(path, account, **kwargs)
 
+    def test_same_second_server_and_local_context_follows_source_row_order(self):
+        self.load([
+            self.message(900, text='收到更新', local_id=1),
+            self.message(0, text='收到更新', local_id=2, source_shard='message_0.db'),
+            self.message(7, text='收到更新', local_id=3),
+        ])
+        expected = ['900', 'message_0.db/2', '7']
+        context = self.store.context(ACCOUNT, TALKER, message_id='message_0.db/2',
+                                     id_kind='local', radius=1)
+        self.assertEqual([row['message_id'] for row in context], expected)
+        server_context = self.store.context(ACCOUNT, TALKER, server_id=900, radius=1)
+        self.assertEqual([row['message_id'] for row in server_context], expected[:2])
+        for query in ('收到更新', '收'):
+            found = self.store.search(query, ACCOUNT)
+            self.assertEqual([row['message_id'] for row in found], list(reversed(expected)))
+
     def test_same_second_local_context_uses_numeric_row_order_then_shard(self):
         self.load([
             self.message(0, local_id=10, source_shard='message_1.db'),

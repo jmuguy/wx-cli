@@ -670,8 +670,8 @@ class Archive:
         if until is not None:
             conditions.append('m.create_time<=?')
             args.append(int(until))
-        order = (' ORDER BY m.create_time DESC, m.sort_seq DESC, COALESCE(m.server_id,-1) DESC,'
-                 " COALESCE(m.local_id,0) DESC, COALESCE(m.source_shard,'') DESC,"
+        order = (' ORDER BY m.create_time DESC, m.sort_seq DESC, COALESCE(m.local_id,0) DESC,'
+                 " COALESCE(m.server_id,-1) DESC, COALESCE(m.source_shard,'') DESC,"
                  ' m.id_kind DESC, m.message_id DESC LIMIT ?')
         where = ' AND '.join(conditions)
         if len(query) >= 3:
@@ -707,13 +707,13 @@ class Archive:
             raise ValueError('message not found')
         radius = max(0, min(int(radius), 50))
         anchor = (row['create_time'], row['sort_seq'],
-                  row['server_id'] if row['server_id'] is not None else -1,
                   row['local_id'] if row['local_id'] is not None else 0,
+                  row['server_id'] if row['server_id'] is not None else -1,
                   row['source_shard'] or '', row['id_kind'], row['message_id'])
-        ordering = ('create_time {dir}, sort_seq {dir}, COALESCE(server_id,-1) {dir}, '
-                    "COALESCE(local_id,0) {dir}, COALESCE(source_shard,'') {dir}, "
+        ordering = ('create_time {dir}, sort_seq {dir}, COALESCE(local_id,0) {dir}, '
+                    "COALESCE(server_id,-1) {dir}, COALESCE(source_shard,'') {dir}, "
                     'id_kind {dir}, message_id {dir}')
-        keys = ("create_time,sort_seq,COALESCE(server_id,-1),COALESCE(local_id,0),"
+        keys = ("create_time,sort_seq,COALESCE(local_id,0),COALESCE(server_id,-1),"
                 "COALESCE(source_shard,''),id_kind,message_id")
         before = self.db.execute(
             f'SELECT * FROM messages WHERE account=? AND talker=? AND ({keys}) '

@@ -137,15 +137,15 @@ fn compare_message_order(a: &Message, b: &Message) -> std::cmp::Ordering {
     (
         a.sort_seq,
         a.create_time,
-        a.server_id,
         a.local_id,
+        a.server_id,
         a.source_shard.as_deref(),
     )
         .cmp(&(
             b.sort_seq,
             b.create_time,
-            b.server_id,
             b.local_id,
+            b.server_id,
             b.source_shard.as_deref(),
         ))
 }
@@ -159,7 +159,7 @@ impl WechatDb {
     /// 3. Decide query mode: LIMIT pushdown (index-backed) or full scan
     /// 4. For each shard: open, check table exists, build SQL, decode rows
     ///    (individual shard failures are recorded as warnings, not errors)
-    /// 5. Merge results across shards, sort by (sort_seq, create_time, server_id)
+    /// 5. Merge results across shards, preserving local row order within time ties
     /// 6. Apply post-filters (keyword, msg_type) in full-scan mode
     /// 7. Apply offset + limit (Rust is the authoritative paginator)
     pub fn query_messages(&self, query: &MessageQuery) -> Result<MessageQueryResult, DbError> {
@@ -227,7 +227,7 @@ impl WechatDb {
             );
         }
 
-        // Sort all messages by (sort_seq, create_time, server_id) in requested direction
+        // Local rows preserve same-time message order; server_id is only a tie-breaker.
         match query.order {
             SortOrder::Asc => all_messages.sort_unstable_by(compare_message_order),
             SortOrder::Desc => all_messages.sort_unstable_by(|a, b| compare_message_order(b, a)),
@@ -412,7 +412,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq > ?1 \
-                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC, m.rowid ASC",
+                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.rowid ASC, m.server_id ASC",
                 select_cols = prepared.select_cols,
                 table = table_name,
             );
@@ -504,7 +504,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq < ?1 \
-                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC \
+                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.rowid DESC, m.server_id DESC \
                  LIMIT ?2",
                 select_cols = prepared.select_cols,
                 table = table_name,
@@ -528,7 +528,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq = ?1 \
-                 ORDER BY m.create_time ASC, m.server_id ASC, m.rowid ASC",
+                 ORDER BY m.create_time ASC, m.rowid ASC, m.server_id ASC",
                 select_cols = prepared.select_cols,
                 table = table_name,
             );
@@ -551,7 +551,7 @@ impl WechatDb {
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.sort_seq > ?1 \
-                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC, m.rowid ASC \
+                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.rowid ASC, m.server_id ASC \
                  LIMIT ?2",
                 select_cols = prepared.select_cols,
                 table = table_name,
@@ -613,7 +613,7 @@ impl WechatDb {
         let mut shard_warnings: Vec<ShardWarning> = Vec::new();
 
         // Phase 1: Locate the target message by server_id across all shards
-        let mut pivot_msg: Option<(i64, i64, i64)> = None; // (sort_seq, create_time, server_id)
+        let mut pivot_msg: Option<(i64, i64, i64, i64)> = None;
         for shard in self.all_shards() {
             let prepared = match prepare_shard_query(
                 shard,
@@ -627,13 +627,13 @@ impl WechatDb {
             };
 
             let sql = format!(
-                "SELECT m.sort_seq, m.create_time, m.server_id \
+                "SELECT m.sort_seq, m.create_time, m.rowid, m.server_id \
                  FROM [{table}] m \
                  WHERE m.server_id = ?1 \
                  LIMIT 1",
                 table = table_name,
             );
-            let result: Result<Option<(i64, i64, i64)>, _> = prepared
+            let result: Result<Option<(i64, i64, i64, i64)>, _> = prepared
                 .conn
                 .as_conn()
                 .query_row(&sql, [target_server_id], |row| {
@@ -641,6 +641,7 @@ impl WechatDb {
                         row.get::<_, i64>(0)?,
                         row.get::<_, i64>(1)?,
                         row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 })
                 .map(Some)
@@ -667,7 +668,7 @@ impl WechatDb {
             }
         }
 
-        let (pivot_seq, pivot_ct, pivot_sid) = match pivot_msg {
+        let (pivot_seq, pivot_ct, pivot_local_id, pivot_sid) = match pivot_msg {
             Some(t) => t,
             None => {
                 // server_id not found — return empty result
@@ -732,16 +733,23 @@ impl WechatDb {
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE (m.sort_seq < ?1) \
                     OR (m.sort_seq = ?1 AND m.create_time < ?2) \
-                    OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.server_id < ?3) \
-                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.server_id DESC, m.rowid DESC \
-                 LIMIT ?4",
+                    OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.rowid < ?3) \
+                    OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.rowid = ?3 AND m.server_id < ?4) \
+                 ORDER BY m.sort_seq DESC, m.create_time DESC, m.rowid DESC, m.server_id DESC \
+                 LIMIT ?5",
                 select_cols = prepared.select_cols,
                 table = table_name,
             );
             query_shard_sql(
                 &prepared,
                 &sql_before,
-                &[pivot_seq, pivot_ct, pivot_sid, context as i64],
+                &[
+                    pivot_seq,
+                    pivot_ct,
+                    pivot_local_id,
+                    pivot_sid,
+                    context as i64,
+                ],
                 is_group,
                 &query.talker,
                 &shard_path,
@@ -758,16 +766,23 @@ impl WechatDb {
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE (m.sort_seq > ?1) \
                     OR (m.sort_seq = ?1 AND m.create_time > ?2) \
-                    OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.server_id > ?3) \
-                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.server_id ASC, m.rowid ASC \
-                 LIMIT ?4",
+                    OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.rowid > ?3) \
+                    OR (m.sort_seq = ?1 AND m.create_time = ?2 AND m.rowid = ?3 AND m.server_id > ?4) \
+                 ORDER BY m.sort_seq ASC, m.create_time ASC, m.rowid ASC, m.server_id ASC \
+                 LIMIT ?5",
                 select_cols = prepared.select_cols,
                 table = table_name,
             );
             query_shard_sql(
                 &prepared,
                 &sql_after,
-                &[pivot_seq, pivot_ct, pivot_sid, context as i64],
+                &[
+                    pivot_seq,
+                    pivot_ct,
+                    pivot_local_id,
+                    pivot_sid,
+                    context as i64,
+                ],
                 is_group,
                 &query.talker,
                 &shard_path,
@@ -909,8 +924,8 @@ fn build_regular_shard_sql(
                  FROM [{table}] m \
                  LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                  WHERE m.create_time >= ?1 AND m.create_time <= ?2 \
-                 ORDER BY m.sort_seq {order}, m.create_time {order}, m.server_id {order}, \
-                 m.rowid {order}",
+                 ORDER BY m.sort_seq {order}, m.create_time {order}, m.rowid {order}, \
+                 m.server_id {order}",
                 table = table_name,
                 order = order.sql_keyword(),
             );
@@ -927,7 +942,7 @@ fn build_regular_shard_sql(
                      LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                      WHERE m.create_time >= ?1 AND m.create_time <= ?2 \
                        AND (m.local_type & 4294967295) = ?3 \
-                     ORDER BY m.sort_seq {order}, m.rowid {order} \
+                     ORDER BY m.sort_seq {order}, m.create_time {order}, m.rowid {order}, m.server_id {order} \
                      LIMIT ?4",
                     table = table_name,
                     order = order.sql_keyword(),
@@ -942,7 +957,7 @@ fn build_regular_shard_sql(
                      FROM [{table}] m \
                      LEFT JOIN Name2Id n ON m.real_sender_id = n.rowid \
                      WHERE m.create_time >= ?1 AND m.create_time <= ?2 \
-                     ORDER BY m.sort_seq {order}, m.rowid {order} \
+                     ORDER BY m.sort_seq {order}, m.create_time {order}, m.rowid {order}, m.server_id {order} \
                      LIMIT ?3",
                     table = table_name,
                     order = order.sql_keyword(),

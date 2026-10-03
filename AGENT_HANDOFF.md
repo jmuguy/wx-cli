@@ -30,14 +30,15 @@ Claude 用户级 `wechat-archive` 已注册：稳定 /opt/homebrew/bin/python3 +
 
 初次持久配置 stdio 协议实跑 exit 0、文件不变。2026-10-03 用户确认 Claude 额度恢复后，claude-sonnet-4-6 模型已实际调用 search/get_context 并核对同一 message_id 3920274865756710861，进程 exit 0。首次上下文大数字误传被拒绝，一次回退采用 message_id 字符串 + id_kind=server，两工具均成功；归档字节/mtime 不变。原始事件仅仓外 0600 保存，报告无聊天正文。
 
-最终 Rust workspace 807 passed/46 suites/11 ignored；clippy -D warnings、release 通过。Python 62 passed + 65 subtests（既有归档验收，本次未改 Python 逻辑）。25 Python + 3 Rust 行为变异全部被击杀；只 helper 身份回声测试删除，改真实 SQLite 跨分片同秒逐页回归。共享 Rust target 曾复用变异 debug 产物，已清理本会话 dev 产物并完整重建全绿；隔离工位不要共享 target。27 个实际密钥、26 个实际盐对归档/来源/日志 151 文件精确匹配均为 0，仓内 guard 通过；不写任何实际密钥/盐/内容散列。
+最终 Rust workspace 809 passed/46 suites/11 ignored；clippy -D warnings、cargo build --release 通过。Python 本次重跑 63 passed + 65 subtests。同秒排序新增 2 Rust/1 Python 消费行为回归已先失败后通过；实际 release 普通/锚点查询与 stdio MCP 第一组文本后9图一致，三组身份集合不变、skipped=0、无残页，MCP 库字节/mtime 不变。既有25 Python +3 Rust变异28/28击杀记录保留，本次不重复宣称新变异。既有27实际密钥/26实际盐对151仓外文件精确匹配0和仓内guard证据保留；不写值。隔离Rust变异不得共享target。
 
 安装器隔离 HOME 实跑两个私有 plist，稳定解释器、空格引号路径、--help 成功、RunAtLoad=false。真实用户 LaunchAgents 没有 install/load；不能称定时后台服务已经启动。
 
 ## 唯一剩余门禁
 
 - 两个 Claude 条件现均通过：真实模型 search/get_context 成功；全量源码输入曾在 900 秒超时，一次回退评审全部 19 个生产文件差异，发现一个 medium/P2 固定临时文件阻塞保存。真实回归先报 AlreadyExists，改唯一 NamedTempFile 后通过；实际进程 smoke 确认后续保存/重载、遗留文件不变及 0600/0700。Claude 针对最终修复及两个上下文疑点复核 verdict=pass、findings=[]、unverified=[]。详见 phase-4；旧 429/超时仅为历史记录。
-- 微信 UI：用户反馈 day 三个日期窗口信息正常，same 三个同秒组对应内容不同，UI 未通过；随后确认第一组文字锚点在微信群的实际日期时间与材料一致，不能再以该条简单时区偏移解释。只读记录显示11:31:13文本local_id3626后接9条图片3627..3635，11:32:25下一条文本3636；旧材料将前一文本按server_id排在第5条，图片仅占位且无本地归档媒体，未证UI邻接构成。无原生UI读取权限，需用户确认两个文字锚点之间的消息构成；不以排序或改选样本掩盖差异。私有材料 ROOT/ui-acceptance-4ga5i5zv，详见 phase-5。
+- 新同秒排序修复的独立 Claude 评审/原始上下文复核亦通过：三项初评误报已撤销，仅跨分片 rowid 重号的确定性兜底说明为 info、无可证缺陷。评审目录 ROOT/claude-order-review-bpxw_aah；完整Rust809/Python63+65与实际CLI/MCP证明见phase-3/4。
+- 微信 UI：day三个窗口用户反馈正常；第一组文字锚点日期时间及“文字→连续9图→下一文字”的构成已由用户确认，旧程序server_id优先将文字排第5条的同秒排序已全面修正。三份新私有表 ROOT/ui-acceptance-source-order-ct_ewa2u（0700/0600），旧表保留为失败证据。第一组图像字节/图片彼此顺序未验证；另两组9条撤回/7张图片的UI构成仍待确认，不从第一组推定。不得标整任务完成。
 - 三个真实场景已按用户“你从真实聊天选题”批准，通过 MCP 找到引用；不在仓库存正文。S1 anchor 6673591242341702288 + 后续 7104427940318103875；S2 3446084846535107143；S3 3920274865756710861。2026-10-03 重新提供三个问题和答案后，用户明确确认原话一致、没有遗漏关键条件、可以实际回答问题；问答业务验收通过，不扩大为 UI 确认。
 - UI 确认后，用户决定是否启动小时 discover/周日 reconcile；不提前 load，尚未收到启用批准。
 

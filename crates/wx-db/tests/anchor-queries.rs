@@ -162,6 +162,96 @@ fn create_shard_1(path: &Path) {
     insert_msg(&conn, ALICE_TABLE, 800, 1008, 1_710_000_300, "msg-8");
 }
 
+fn create_same_second_source_order_fixture() -> TempDir {
+    let dir = create_anchor_fixture();
+    for (shard, ids) in [(0, &[900, 10, 400][..]), (1, &[20][..])] {
+        let conn =
+            Connection::open(dir.path().join(format!("message/message_{shard}.db"))).unwrap();
+        conn.execute(&format!("DELETE FROM [{ALICE_TABLE}]"), [])
+            .unwrap();
+        for &id in ids {
+            insert_msg(
+                &conn,
+                ALICE_TABLE,
+                300,
+                id,
+                1_700_000_300,
+                "synthetic order",
+            );
+        }
+    }
+    dir
+}
+
+#[test]
+fn same_second_regular_pages_follow_local_rows_before_server_ids() {
+    let dir = create_same_second_source_order_fixture();
+    let db = WechatDb::open(dir.path()).unwrap();
+    for full_scan in [false, true] {
+        for (order, expected) in [
+            (wx_db::SortOrder::Asc, [20, 900, 10, 400]),
+            (wx_db::SortOrder::Desc, [400, 10, 900, 20]),
+        ] {
+            for (offset, id) in expected.into_iter().enumerate() {
+                let mut query = MessageQuery::for_talker("wxid_alice")
+                    .order(order)
+                    .offset(offset)
+                    .limit(1);
+                if full_scan {
+                    query = query.keyword("synthetic");
+                }
+                let result = db.query_messages(&query).unwrap();
+                assert_eq!(
+                    result
+                        .items
+                        .iter()
+                        .map(|msg| msg.server_id)
+                        .collect::<Vec<_>>(),
+                    vec![id]
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn same_second_server_anchor_uses_the_source_order_boundary_across_shards() {
+    let dir = create_same_second_source_order_fixture();
+    let db = WechatDb::open(dir.path()).unwrap();
+    for (pivot, expected) in [(900, vec![20, 900, 10]), (10, vec![900, 10, 400])] {
+        let query = MessageQuery::for_talker("wxid_alice")
+            .around_server_id(pivot)
+            .context(1);
+        let result = db.query_messages_anchor(&query).unwrap();
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|msg| msg.server_id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
+    for query in [
+        MessageQuery::for_talker("wxid_alice")
+            .around_sort_seq(300)
+            .context(0),
+        MessageQuery::for_talker("wxid_alice")
+            .after_sort_seq(299)
+            .limit(4),
+    ] {
+        let result = db.query_messages_anchor(&query).unwrap();
+        assert_eq!(
+            result
+                .items
+                .iter()
+                .map(|msg| msg.server_id)
+                .collect::<Vec<_>>(),
+            vec![20, 900, 10, 400]
+        );
+    }
+}
+
 // ---------------------------------------------------------------------------
 // AfterSortSeq tests
 // ---------------------------------------------------------------------------

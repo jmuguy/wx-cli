@@ -33,11 +33,13 @@ v1 media manifest 按顶层 Image/Voice/Video/File 消息计数，区分 availab
 
 ## 回归与变异
 
-实际最终门禁：`cargo test --workspace` 807 passed、46 suites、11 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 通过；release build 通过。`python3 -m pytest -q archive/tests` 62 passed、65 subtests passed（既有归档验收，本次仅改 Rust 密钥保存，不重复声称重跑 Python）。
+实际最终门禁：`cargo test --workspace` 809 passed、46 suites、11 ignored；`cargo clippy --workspace --all-targets -- -D warnings` 通过；`cargo build --release` 通过（artifact 308）。`python3 -m pytest -q archive/tests` 63 passed、65 subtests passed，本次同秒排序修复后已重跑。
 
 先失败后修复的消费行为：派生元数据误计为编辑、同秒 local-only 邻居排序、MCP 越界整数中断后续请求、大 server_id 的不安全 JSON 数字、预期缺失诊断含 os error 2/文件名含 error 被误判、自动采集缺少分片来源。已保留确定性行为回归；删除错误措辞钉死和仅 helper 转发的身份断言，改为真实 SQLite 查询六条同秒/同 rowid/跨分片记录并逐页核对。
 
 Claude 复核新增密钥保存回归：固定临时文件遗留导致 AlreadyExists 已先失败复现，再改唯一私有临时文件原子替换。实际进程 smoke 验证保存/重载、未知遗留文件不变、0600/0700；完整 Rust 门禁与 Claude 修复复核通过，细节见 phase-4。
+
+同秒 server/local 混合排序回归：旧代码真实失败 2 Rust + 1 Python（artifact 298/297），修复为 local_id/rowid 先于 server_id，并同步 SQL LIMIT、双向分页与锚点游标。覆盖同秒跨分片 rowid 重号、正反逐条分页、全扫描/SQL LIMIT、server/序号锚点、混合身份、中文 FTS 与短词 LIKE。实际 release query 三个原组身份集合均不变、skipped=0、无残页；第一组与实际 stdio MCP get_context 均返回 local_id 3626..3635、文字后9图，再接下一文本。MCP 调用前后归档字节/mtime 不变，不修改数据库或历史数据。Claude 新排序评审及原始上下文复核通过，详见 phase-4；第一组 UI 构成获用户确认，另两组及图片内容未验证。
 
 隔离变异结果：25 个 Python + 3 个 Rust，28/28 被对应行为回归击杀；不是编译失败或测试发现错误。
 
