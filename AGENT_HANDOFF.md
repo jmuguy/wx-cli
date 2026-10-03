@@ -30,9 +30,9 @@ Claude 用户级 `wechat-archive` 已注册：稳定 /opt/homebrew/bin/python3 +
 
 初次持久配置 stdio 协议实跑 exit 0、文件不变。2026-10-03 用户确认 Claude 额度恢复后，claude-sonnet-4-6 模型已实际调用 search/get_context 并核对同一 message_id 3920274865756710861，进程 exit 0。首次上下文大数字误传被拒绝，一次回退采用 message_id 字符串 + id_kind=server，两工具均成功；归档字节/mtime 不变。原始事件仅仓外 0600 保存，报告无聊天正文。
 
-同秒排序验收时 Rust workspace 809 passed/46 suites/11 ignored；clippy -D warnings、cargo build --release 通过。Python 重跑 63 passed + 65 subtests。同秒排序新增 2 Rust/1 Python 消费行为回归已先失败后通过；实际 release 普通/锚点查询与 stdio MCP 第一组文本后9图一致，三组身份集合不变、skipped=0、无残页，MCP 库字节/mtime 不变。既有25 Python +3 Rust变异28/28击杀记录保留，本次不重复宣称新变异。既有27实际密钥/26实际盐对151仓外文件精确匹配0和仓内guard证据保留；不写值。隔离Rust变异不得共享target。后续启用排查撤回后的最终门禁及删除一项非业务测试的说明见下方与phase-3。
+同秒排序验收时 Rust workspace 809 passed/46 suites/11 ignored；clippy -D warnings、cargo build --release 通过。Python 重跑 63 passed + 65 subtests。同秒排序新增 2 Rust/1 Python 消费行为回归已先失败后通过；实际 release 普通/锚点查询与 stdio MCP 第一组文本后9图一致，三组身份集合不变、skipped=0、无残页，MCP 库字节/mtime 不变。既有25 Python +3 Rust变异28/28击杀记录保留，本次不重复宣称新变异。既有27实际密钥/26实际盐对151仓外文件精确匹配0和仓内guard证据保留；不写值。隔离Rust变异不得共享target。后续启用排查撤回后的最终门禁及删除两项非业务测试的说明见下方与phase-3。
 
-安装器隔离 HOME 的模板/路径验证保留。2026-10-03 用户明确授权启动，真实两个 LaunchAgents 已安装0600并实际 bootstrap/kickstart；首个小时采集exit0，导入37/新增35、9媒体文件、checkpoint1791036904。随后原生解密/导出出现EINTR或1800秒超时；已bootout/disable两任务，当前不在运行。系统TCC记录Python的SystemPolicyAppData预检authValue=0并进入未完成的授权提示；须用户处理Python系统弹窗后再启用。私有证据ROOT/scheduler-activation-875zzki8，详见phase-3。
+安装器隔离 HOME 的模板/路径验证保留。2026-10-03 用户明确授权启动，真实两个 LaunchAgents 已安装0600并实际 bootstrap/kickstart；首个小时采集exit0，新增35。2026-10-04用户处理AppData弹窗后，小时任务再次exit0、新增23；近30天周对账exit0，复核1779条/5chunks，新增/内容变化/消息缺失均0、353可用媒体文件、11项源缺失。但新后台进程仍再次弹窗，不能视为无人值守；两任务已卸载禁用。用户同意Python完全磁盘访问并报告已打开开关；Homebrew bin启动器与Python.app签名不同，已将两个私有plist首参数改为稳定opt路径下Python.app/Contents/MacOS/Python。新主体org.python.python实探仍AllFiles0，等待用户在系统设置给准确Python.app授权。TCC AllFiles预检与AppData提示是不同请求，不混记。私有证据ROOT/scheduler-activation-875zzki8，详见phase-3。
 
 ## 验收完成与调度授权阻塞
 
@@ -40,6 +40,6 @@ Claude 用户级 `wechat-archive` 已注册：稳定 /opt/homebrew/bin/python3 +
 - 新同秒排序修复的独立 Claude 评审/原始上下文复核亦通过：三项初评误报已撤销，仅跨分片 rowid 重号的确定性兜底说明为 info、无可证缺陷。评审目录 ROOT/claude-order-review-bpxw_aah；完整Rust809/Python63+65与实际CLI/MCP证明见phase-3/4。
 - 微信 UI：day三个窗口用户反馈正常；第一组文字锚点日期时间及“文字→连续9图→下一文字”构成确认，排序已修复。提供三份新表 ROOT/ui-acceptance-source-order-ct_ewa2u 后，用户明确确认另两组9条撤回/7张图片“都是对的”，三组消息构成均通过，不再阻塞G5。旧失败表保留。图像本地缺失字节与图片内部顺序未验证，不声称历史媒体字节完整。
 - 三个真实场景已按用户“你从真实聊天选题”批准，通过 MCP 找到引用；不在仓库存正文。S1 anchor 6673591242341702288 + 后续 7104427940318103875；S2 3446084846535107143；S3 3920274865756710861。2026-10-03 重新提供三个问题和答案后，用户明确确认原话一致、没有遗漏关键条件、可以实际回答问题；问答业务验收通过，不扩大为 UI 确认。
-- 调度启用已有用户明确批准，但这不替代macOS系统权限。新运行任务TASK-20261003-220942-6344因Python AppData系统授权待处理而blocked；两个plist保留、任务已停用。未经用户处理弹窗不再重复启动。源码/资源类型的试探改动未解决后台问题，已全部撤回；最终Rust807/46suites/11ignored、clippy/release通过，仅移除两项终端标签文案断言，其中一项依赖真实微信状态并挂起；保留JSON契约/业务回归，实际paths --json与只读archive status成功。真实keystore哈希不变，MCP/已有归档继续可读。
+- 调度启用已有用户明确批准，但这不替代macOS系统权限。新运行任务TASK-20261003-220942-6344因准确Python.app的完全磁盘访问待完成而blocked；两个plist保留、任务已停用。未经用户完成设置不再重复启动。源码/资源类型的试探改动未解决后台问题，已全部撤回；最终Rust807/46suites/11ignored、clippy/release通过，仅移除两项终端标签文案断言，其中一项依赖真实微信状态并挂起；保留JSON契约/业务回归，实际paths --json与只读archive status成功。最新status83272条、checkpoint1791067219，可用媒体消息4537、明确源缺失6091；真实keystore旧mtime未变、最新验证窗口内哈希不变，MCP/已有归档继续可读。
 
-归档/只读 MCP 的原任务TASK-20261001-173002-8057已完成，G5通过，不因后续系统授权未完成改回未验收；本次启用任务另行记录blocked。用户授权只涉及既有账号和一个批准群，不扩大会话范围或联网补媒体。全部状态用aitask CLI写唯一任务池，不直接改文件。下一步由用户处理python3.14访问其他应用数据的系统提示，再实跑小时采集与周对账；两个后台退出码/归档状态获证据后才保持启用。
+归档/只读 MCP 的原任务TASK-20261001-173002-8057已完成，G5通过，不因后续系统授权未完成改回未验收；本次启用任务另行记录blocked。用户授权只涉及既有账号和一个批准群，不扩大会话范围或联网补媒体。全部状态用aitask CLI写唯一任务池，不直接改文件。下一步由用户在完全磁盘访问设置中给 `/opt/homebrew/Cellar/python@3.14/3.14.7/Frameworks/Python.framework/Versions/3.14/Resources/Python.app` 打开开关，再验证新后台进程无提示且小时/周程序成功；获证据后才保持启用。安装器重跑会恢复PATH中的python3选择，须保留并重新核对私有plist的直接Python.app配置。
