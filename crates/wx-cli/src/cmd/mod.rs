@@ -1,3 +1,5 @@
+pub mod archive_inspect;
+pub mod archive_snapshot;
 pub mod contacts;
 pub mod db_dev;
 pub mod decode_image;

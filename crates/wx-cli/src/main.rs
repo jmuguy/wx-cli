@@ -372,6 +372,23 @@ enum Commands {
         #[command(subcommand)]
         action: DbDevAction,
     },
+    /// Snapshot every source database for the external archive (v3 path)
+    ArchiveSnapshot {
+        #[command(flatten)]
+        args: crate::cmd::archive_snapshot::ArchiveSnapshotArgs,
+    },
+    /// Inspect a snapshot generation / export one session completely (v3)
+    #[command(name = "archive-inspect")]
+    ArchiveInspect {
+        #[command(flatten)]
+        args: crate::cmd::archive_inspect::ArchiveInspectArgs,
+    },
+    /// Internal worker; only spawned by `archive-snapshot` itself
+    #[command(name = "__archive-snapshot-worker", hide = true)]
+    ArchiveSnapshotWorker {
+        #[command(flatten)]
+        args: crate::cmd::archive_snapshot::ArchiveSnapshotWorkerArgs,
+    },
 }
 
 #[derive(Subcommand)]
@@ -767,6 +784,13 @@ async fn main() {
         Commands::Paths { json } => cmd::paths::cmd_paths(json),
         Commands::Doctor { fix } => cmd::doctor::cmd_doctor(fix),
         Commands::DbDev { path, action } => cmd::db_dev::cmd_db_dev(&path, action),
+        Commands::ArchiveSnapshot { args } => std::process::exit(cmd::archive_snapshot::cmd_archive_snapshot(args)),
+        Commands::ArchiveInspect { args } => {
+            std::process::exit(cmd::archive_inspect::cmd_archive_inspect(args))
+        }
+        Commands::ArchiveSnapshotWorker { args } => {
+            std::process::exit(cmd::archive_snapshot::cmd_worker(args))
+        }
     };
 
     if let Err(e) = result {

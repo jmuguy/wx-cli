@@ -1,6 +1,73 @@
 # wx-archive 交接
 
-更新：2026-10-03。任务 TASK-20261001-173002-8057；分支 feat/archive-layer，不推 main。完整决策见 docs/PLAN-wechat-archive.md，证据见 docs/reports/phase-0..5.md。此文件取代“等待 G1 历史确认、尚未提取密钥”的旧交接；历史失败/退出取消证据仍在 phase-1。
+更新：2026-10-05。当前父任务 TASK-20261004-075803-13F5；分支 feat/archive-layer，未提交、不推送。v3 本轮代码/合成验收通过，真实及生产门未完成；下方保留原 v2 已验收与启用记录，本轮未重验其运行状态。
+
+## 2026-10-05 用户追加授权：提交、推送与部署
+
+用户明确要求“直接提交、推送、部署”。这次授权覆盖feat/archive-layer的当前v3改动提交/推送与版本部署，覆盖本任务先前“不提交/不推送”的约定，不改main。沿用已验证冻结代码；现有报告中的“未提交/未推送”保留为当时历史事实。
+
+部署与真实采集启用分别记录：交付版本不能自动扩大白名单、初始化真实主库、重启现有采集任务或切换生产采集链。生产恢复路径未实现、真实设备/人工/Claude门仍未完成。当前仓库未配置NAS部署主机/目录，已向用户询问目标；先提交推送、准备不含密钥/数据的版本包，不能将版本包准备冒称远端部署完成。
+
+## 2026-10-05 收尾：GLM + 用户批准的 Luna，合成门通过，待真实门
+
+GLM-5.3原会话恢复后完成因果claim、有界行读取、projection/backup/migrate；再次429/1308后，按用户明确指示用GPT-6 Luna完成角色CLI、stdio有界读取/fatal终止、Rust压缩组合夹具及最终投影策略漏洞返修，Codex独立验收。既有修改与失败证据全部保留。guard.py/vfs.py与原两份Linux固定卷测试逐字不变；原34项复验通过。
+
+最终冻结独立结果：Rust883通过/11忽略/51套件，clippy/release通过；Mac Python247通过/35 Linux专用跳过/65subtests通过；Linux完整Python281通过/1 Rust工作区缺失跳过。实际CLI→Rust claim/snapshot/inspect/collect、prepared upload/reconcile、projection刷新及query隔离、AES-GCM完整/增量恢复、实际v2 importer迁移通过。最终撤权红测证明fresh/stateless reader漏洞，已修成策略版本错配阻断所有查询至重新发布，同版本内容变化拒绝。文档后密钥扫描通过。
+
+父任务转review，**不标done/生产完成**。production restore卷绑定路径尚未实现，CLI默认拒绝，仅显式synthetic演练；真实源开销/页格式、NAS/SSH、盘UUID/加密/锁/fsync、部署OS权限、真实迁移恢复、微信UI/问答、Claude独立评审/实际模型工具调用分别UNVERIFIED。真实盘点/扩大采集与生产切换仍须用户明确批准；现有v2定时/MCP/真实数据保持原状。仅停止本轮隔离wx-archive-v3-test，不操作default。
+
+完整清单、原始日志与授权边界见 `docs/reports/external-archive-v3-luna-accepted-20261005.md`；最终指纹 `work/external-archive-implementation/luna-policy-final-code.json`，验收后changed=[]。继续前读本节及最新报告，不能再按历史报告把模块当缺失，也不能把合成通过当真实通过。
+
+## 2026-10-04 23:54 续接：额度仍阻塞，既有成果保留
+
+用户明确接续父任务。现有40个修改/未跟踪文件已在私有work目录备份；本轮GLM三个原会话均实际API 429/1308，没有新实现，逐文件核对与备份无变化。独立Linux固定卷34/34再次PASS；Python147通过/5失败/34Linux跳过/65subtests，与冻结报告一致。Rust代码未变，本轮未重复其全门，不把旧结果当本轮运行。服务仍提示2026-10-05 01:17:46 +08重置，仅提示未验证。
+
+只停止本轮拥有的GLM实施进程，隔离VM收尾；未改真实数据/NAS/调度/MCP/TCC/签名/权限，无提交推送。父任务仍BLOCKED/未完成，未代写实现或换模型。完整续接证据、剩余项和原分工见 `docs/reports/external-archive-v3-resume-20261004.md`；前次报告与固定卷验收保留。
+
+## 前次状态：2026-10-04 23:30 后冻结（GLM再次额度中断）
+
+**固定卷子任务已done/PASS，父任务blocked/未完成。** 用户恢复额度后GLM实际完成了固定卷子任务，Codex验收通过才恢复父任务。本次冻结独立结果：Linux34/34；Rust865通过/11忽略/50套件，clippy/release通过；Python147通过/5失败/34Linux跳过/65subtests通过。报告 `docs/reports/external-archive-v3-after-binding-20261004.md`。
+
+父任务尚缺：未claim快照仍可凭时钟覆盖已有内容（2项独立红测）；另3项GLM自测失败；Rust整页缓存/未知列行总上限待修；projection/backup/migration/CLI均未生成。最后代码指纹 `work/external-archive-implementation/parent-quota-frozen-code.json`，未提交/push，无生产改动。
+
+实际429/1308提示2026-10-05 01:17:46 +08重置，仅服务提示未验证。全部GLM已停止，隔离VM收尾状态见报告环境证据。续做分工：NAS会话负责除projection外的Python；原源端会话转projection独占两文件；新3995f1d8会话只限Rust行读取。各提示/会话/门禁详见上述报告，恢复前先读，不互相覆盖。已批准代码权限持续有效，真实源/NAS/生产门仍未批准。
+
+## 父任务续做检查点（2026-10-04 23:14 +08，仍实施中）
+
+Codex独立Rust复验：860 passed / 11 ignored / 50 suites，clippy/release exit0，日志 `parent-codex-final-*.log`，指纹 `parent-codex-final-rust-code.json`（均在私有work证据目录）。首次独立测试发现fixture依赖umask077，GLM已显式设0600修复，未放宽生产规则。源端现继续补读取/解压前容量上限和图片原件/缩略图/派生物标识，因此上述结果绑定补改前指纹，后续须重验受影响门。
+
+NAS C0/run绑定、presence、资产、分页行长、ACK丢失恢复、损坏intent共20项Codex独立测试通过；随后新端到端用例 `test_delayed_older_snapshot_cannot_replace_newer_capture` 失败：旧export晚collect被分配新C0，覆盖新内容。GLM正修源视图之前取得run/C0的因果绑定（`parent-capture-order-red.log` / `parent-capture-order-review.txt`）。不得把20项通过称全链路C0正确。当前采集器已分页、流送媒体、持久intent；projection/backup/migration/CLI未交付。实际GLM源/NAS会话均继续，所有数据合成，真实生产门不变。
+
+## 父任务续做检查点（2026-10-04 22:36 +08，仍实施中）
+
+两条实际 GLM-5.3 原会话续做 Rust 源端与 Python NAS。Codex新增 run 绑定、未变化 presence、附件声明独立测试，当前16项全过；完整 Mac Python 独立复跑101 passed / 34 Linux skipped / 65 subtests passed，exit0，证据 `work/external-archive-implementation/parent-python-c0-green.log`。Rust新增独立CLI漏片/跨库身份红测待修，证据 `parent-source-independent-red.log`；两端正统一record contract v2。collector/projection/backup/migration/CLI和端到端仍待交付；不能把中途测试通过当完成。父任务仍claimed，固定卷子任务done。生产门不变。
+
+## 2026-10-04 Linux 固定卷子任务已通过，父任务恢复
+
+子任务 TASK-20261004-174427-7D96 经实际 GLM-5.3 修复、Codex 独立验收：Linux 合并34/34、独立18/18通过，匿名临时文件同卷及12MB数据读写证据通过。详见 `docs/reports/linux-volume-binding-accepted-20261004.md`。Mac Python仍有父任务已知C0失败；不代表全项目通过。父任务 TASK-20261004-075803-13F5 恢复源端完整性/C0/全链路实施，真实源/NAS/生产门不变。隔离 wx-archive-v3-test 继续用于合成验证。
+
+## 2026-10-04 21:42 Linux 固定卷再次续做中
+
+用户通知额度恢复，原GLM-5.3会话已实际响应并修复ENOTDIR错误分类/临时名称缓存增长。Codex最新合并Linux23项通过，但新增temp名冲突故障注入发现：base unixOpen独占创建EEXIST后只读回退，导致同名合成文件被删除。已实际strace复现并退回GLM封闭此失败分支；子任务仍未放行，父任务不恢复。证据`binding-retry-temp-race.log`、`.strace`和`binding-retry-linux.log`；只测试独立VM合成数据。
+
+## 2026-10-04 18:12 Linux 固定卷独立任务：待GLM额度恢复
+
+- 子任务 `TASK-20261004-174427-7D96`（父TASK-20261004-075803-13F5），用户批准先拆分、通过才继续。GLM-5.3已实际修复VFS原始指针生命周期、守卫stat避免释放SQLite锁、Linux禁止注册失败回退、临时spill；Codex只独立测试/文档，未代改实现。
+- 独立Linux13项全部通过；合并GLM自测20项中19通过/1失败：中间目录symlink实际拒绝，但返回path_open_failed，测试期待其他代码。未放行，父任务保持暂停。
+- Rust842通过/11忽略、Clippy/release通过；Mac Python73通过/1失败(C0原有)/20 Linux跳过/65subtests。密钥门曾因两份报告中的完整SHA256指纹失败，现改为引用私有清单且不改扫描门，最终重验见报告。
+- 18:08 GLM实际429/1308，服务提示19:57:59重置、进程exit1，无后台实施；只报告提示时间，不假称额度恢复。独立Colima wx-archive-v3-test与原default均Stopped。
+- 规格 `docs/specs/linux-volume-binding.md`，报告 `docs/reports/linux-volume-binding-20261004.md`，证据 `work/external-archive-implementation/binding-*`。当前代码仅guard/master/vfs及测试变化；源端/C0/全链路其他缺口未改。未触碰真实源/密钥/NAS/调度/MCP/权限，无提交/push。
+- 恢复后先让原GLM解决剩余错误码/测试语义并补最终自验，Codex重审通过再恢复父任务；既有代码授权持续有效。真实设备/生产门不变。
+
+## 2026-10-04 外置盘 v3 暂停返修（验收 FAIL，禁止切换）
+
+- TASK-20261004-075803-13F5：codex 领取、实际 GLM-5.3 实施、Codex 独立复验。基线 `601b34ce9ea30bd19d913e903a1213e96d7a5dd5`，全部改动未提交，不 push、不改 main。
+- 用户通知额度恢复后，16:33 +08 两个原 GLM 会话均实际响应并续写代码，未再见429。源端 SID `8215ca10-880d-4083-bd1d-8f88d0747fff`、NAS SID `be7e6bde-c777-4770-a82d-8c7bfbe8acf5`。已停止这两个实施进程并确认退出，不再后台继续。
+- 冻结代码独立结果：Rust workspace 842 passed / 48 suites / 11 ignored；Clippy/release/密钥门通过；Python 73 passed / 1 failed / 65 subtests passed。失败是客户端伪造 C0 导致旧捕获覆盖新内容。Linux 卷绑定正常 WAL 初始化也失败。额外 fmt check 有6文件格式差异。完整命令/证据/代码指纹见 `docs/reports/external-archive-v3-retry-20261004.md`。
+- 暂停原因是指定 PLAYBOOK §10“同一改动退回3轮仍未通过，停下交人判断”：路径检查 ABA、无关 fd 欺骗连接证明、新版 ctypes VFS 正常写失败均已复现。建议用户决定是否将 Linux 固定卷层独立拆任务再续做；本次不是额度阻塞，不得自动宣称完成。
+- S3 导出新增但尚有正文 BLOB 有损/分片身份/媒体完整性缺陷；S4 仅部分 master/guard/reconcile/upload/transport/VFS，collector/projection/backup/migration/CLI 与端到端均未完成。完整记录与可重放日志待补。watchdog ACK 握手已加，严格 T_max 仍未证明（主动100ms slack）。
+- 批准范围保持代码/合成/非破坏性预检；未读取真实正文/密钥，未连接 NAS，未修改现有单群调度/MCP/TCC/签名。真实范围、设备、权限隔离、源开销、备份恢复和生产触发全部未验收。源码使用仓内 target/release/wx-cli，不覆盖 ~/.local/bin/wx。
+- 独立 Linux Colima profile `wx-archive-v3-test` 已停止；无宿主目录挂载、不激活 context、不改 SSH config，原 default profile 仍 Stopped。保留隔离测试盘用于复现。原始证据 `work/external-archive-implementation/` 私有且忽略；历史14:55配额报告保留但已标历史，不代表当前状态。
 
 ## 当前可运行状态
 

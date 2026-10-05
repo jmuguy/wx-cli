@@ -37,14 +37,24 @@ mod open;
 mod pool;
 mod sessions;
 pub mod shard_metadata;
+pub mod snapshot;
 mod xml_extract;
 
 pub use error::{DbError, ShardWarning};
+// Lossless content decoding + packed-info md5 extraction for the offline
+// archive path (same verified zstd/protobuf rules as the query path).
+pub use decode::{decode_content_lossless, decode_content_lossless_bounded, decode_packed_info};
 pub use fts::{FtsBuildStats, FtsHit, FtsSearchResult};
 pub use model::*;
 pub use native_fts::{load_name2id, FtsHitType, NativeFtsHit, NativeFtsResult};
 pub use open::{open_readonly_connection, WechatDb};
 pub use pool::ShardPool;
+pub use snapshot::{
+    atomic_private_write, ensure_private_dir, enumerate_source_databases, open_snapshot_copy,
+    publish_snapshot, verify_snapshot, BackupOptions, BackupStats, CipherParams, OpenedSource,
+    PinnedSnapshot, SnapshotError, SnapshotExpectation, SnapshotKeys, SnapshotMeta,
+    SourceEnumeration,
+};
 pub use xml_extract::extract_quote_fromusr;
 
 // Test-only helpers for building protobuf fixtures.

@@ -82,15 +82,20 @@ pub(crate) fn check_column_exists(
     Ok(exists)
 }
 
+/// The verified WCDB compression-detection rule, shared by every decoder:
+/// `WCDB_CT_message_content == 4` marks zstd, and zstd magic bytes are
+/// recognized even without the flag.
+fn is_zstd_flagged(raw: &[u8], wcdb_ct: Option<i32>) -> bool {
+    wcdb_ct == Some(4) || (raw.len() >= 4 && raw[..4] == ZSTD_MAGIC)
+}
+
 /// Decode raw content bytes, optionally using wcdb compression type.
 ///
 /// - If `wcdb_ct == Some(4)`, treat as zstd compressed data.
 /// - Else if raw starts with zstd magic bytes, decompress as zstd.
 /// - Otherwise, interpret as UTF-8 (lossy).
 pub(crate) fn decode_content(raw: &[u8], wcdb_ct: Option<i32>) -> Result<String, DbError> {
-    let is_zstd = wcdb_ct == Some(4) || (raw.len() >= 4 && raw[..4] == ZSTD_MAGIC);
-
-    if is_zstd {
+    if is_zstd_flagged(raw, wcdb_ct) {
         let decompressed = zstd::decode_all(raw).map_err(|e| DbError::Zstd(e.to_string()))?;
         Ok(String::from_utf8_lossy(&decompressed).into_owned())
     } else {
@@ -98,9 +103,69 @@ pub(crate) fn decode_content(raw: &[u8], wcdb_ct: Option<i32>) -> Result<String,
     }
 }
 
+/// Lossless-aware variant of the verified [`decode_content`] rule (same zstd
+/// detection, same decompression) for callers that must never replace bytes:
+///
+/// - zstd decompression failure is a hard error (the caller must not pretend
+///   success on undecodable content);
+/// - bytes that are not valid UTF-8 (before or after decompression) yield
+///   `None` text instead of lossy replacement — the caller is expected to
+///   preserve the raw column bytes separately;
+/// - the second return value reports whether zstd decompression was applied.
+pub fn decode_content_lossless(
+    raw: &[u8],
+    wcdb_ct: Option<i32>,
+) -> Result<(Option<String>, bool), DbError> {
+    if !is_zstd_flagged(raw, wcdb_ct) {
+        return Ok((std::str::from_utf8(raw).ok().map(str::to_string), false));
+    }
+    let decompressed = zstd::decode_all(raw).map_err(|e| DbError::Zstd(e.to_string()))?;
+    Ok((
+        std::str::from_utf8(&decompressed).ok().map(str::to_string),
+        true,
+    ))
+}
+
+/// Bounded variant of [`decode_content_lossless`] for callers with an
+/// explicit work-set budget (the archive export path). The zstd expansion is
+/// capped at `max_decoded_bytes` and STREAMED — never `decode_all` — so a
+/// compressed bomb is refused after at most `limit + 1` decoded bytes, never
+/// after the full expansion has already consumed memory. Exceeding the cap is
+/// the machine-readable hard error `DbError::DecodedOverLimit`
+/// (`decoded_over_limit: …`); callers must fail closed. Uncompressed input
+/// has no expansion risk and delegates to the unbounded lossless rule
+/// unchanged (its size is bounded by the raw column cap the caller enforces
+/// before decoding).
+pub fn decode_content_lossless_bounded(
+    raw: &[u8],
+    wcdb_ct: Option<i32>,
+    max_decoded_bytes: usize,
+) -> Result<(Option<String>, bool), DbError> {
+    if !is_zstd_flagged(raw, wcdb_ct) {
+        return decode_content_lossless(raw, wcdb_ct);
+    }
+    use std::io::Read;
+    let decoder = zstd::stream::Decoder::new(raw).map_err(|e| DbError::Zstd(e.to_string()))?;
+    // Read at most limit + 1 bytes: the extra byte is the over-limit signal,
+    // so memory use is bounded by the caller's cap regardless of the true
+    // decompressed size.
+    let mut out = Vec::new();
+    decoder
+        .take(max_decoded_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut out)
+        .map_err(|e| DbError::Zstd(e.to_string()))?;
+    if out.len() > max_decoded_bytes {
+        return Err(DbError::DecodedOverLimit {
+            limit: max_decoded_bytes,
+            actual: out.len() as u64,
+        });
+    }
+    Ok((std::str::from_utf8(&out).ok().map(str::to_string), true))
+}
+
 /// Decode a PackedInfo protobuf blob into our model type.
 /// Returns `None` on any decode error (swallows errors).
-pub(crate) fn decode_packed_info(blob: &[u8]) -> Option<PackedInfo> {
+pub fn decode_packed_info(blob: &[u8]) -> Option<PackedInfo> {
     use prost::Message;
     let proto = PackedInfoProto::decode(blob).ok()?;
     Some(PackedInfo {

@@ -23,6 +23,11 @@ pub enum DbError {
     /// An error during zstd decompression of message content.
     #[error("zstd error: {0}")]
     Zstd(String),
+    /// Decompressed content exceeded the caller's bounded work-set limit
+    /// (additive; constructed only by `decode_content_lossless_bounded`).
+    /// Machine-readable token: `decoded_over_limit`.
+    #[error("decoded_over_limit: {actual} bytes exceeds limit {limit}")]
+    DecodedOverLimit { limit: usize, actual: u64 },
     /// An error applying the encryption key (sqlite3_key failed or wrong key).
     #[error("encryption key error: {0}")]
     EncryptionKey(String),

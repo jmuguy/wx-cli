@@ -3141,10 +3141,12 @@ dependencies = [
  "hex",
  "libc",
  "lru",
+ "md5",
  "rayon",
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "silk-rs",
  "tempfile",
  "tokio",
@@ -3164,6 +3166,7 @@ dependencies = [
  "wx-media",
  "wx-monitor",
  "wx-paths",
+ "zstd",
 ]
 
 [[package]]
@@ -3196,6 +3199,7 @@ version = "0.7.4"
 dependencies = [
  "hex",
  "insta",
+ "libc",
  "md5",
  "prost",
  "rusqlite",
